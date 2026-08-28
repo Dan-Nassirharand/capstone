@@ -6,7 +6,7 @@ Dan views Software Engineering as the application of philosophy to mathematics
 for the betterment of humanity.  He feels personally fulfilled by learning,
 motivating others, and challenging himself.
 
-What sets Dan apart from other Software Engineers is his ability to communicate in cross-function environments with an advanced level of emotional intelligence.  He has nearly two decades of cumulative experience as a
+What sets Dan apart from other Software Engineers is his ability to communicate in cross-functional environments with an advanced level of emotional intelligence.  He has nearly two decades of cumulative experience as a
 fitness instructor, resident advisor, and student orientation assistant.
 
 In his free time, Dan enjoys rock climbing, running, and reading.
