@@ -68,6 +68,9 @@ timeline in class
                     - Build critical thinking skills
                     - Build confidence
                     - Find community of like-minded people
+### Sketches
+<img width="646" height="800" alt="image" src="https://github.com/user-attachments/assets/2f42d27a-560d-438f-83f5-ff304bd7693e" />
+<img width="2019" height="2500" alt="image" src="https://github.com/user-attachments/assets/de6710dc-9de4-41f8-b81f-9f08a64775bc" />
 
 ### AI Use Disclosure
 - Used Open AI's Chat GPT to research available SDKs and development environments for ESP-32.
