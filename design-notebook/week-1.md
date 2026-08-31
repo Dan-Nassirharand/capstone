@@ -1,5 +1,6 @@
 # Executive Summary
-
+- Advisor: Will Hawkins
+- Started project ideation + sketching
 ## 8/24 Meeting with Professor Hawkins
 ### Advisor
 - Handshake agreement for Professor Hawkins to be my advisor
