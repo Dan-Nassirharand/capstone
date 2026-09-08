@@ -1,4 +1,5 @@
 # capstone
-Dan Nassirharand's undergraduate senior capstone project at the University of Cincinnati.
+Dan Nassirharand and Maxwell Blevins/ undergraduate senior capstone project at the University of Cincinnati.
 
-- [Professional Biography](/professional-biography.md)
+- [Dan's Professional Biography](/professional-biography.md)
+- [Max's Professional Biography](/max-professional-biography.md)
