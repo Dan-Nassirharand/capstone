@@ -48,4 +48,24 @@
 
 ## Use Case
 
+<!-- MAX TODO -->
+
+<!-- At least one use case. Take your most complex story and expand it, under a Use cases heading, with an ID (UC-01) and the story it expands. Include the use case name as a short verb phrase, the primary actor and any secondary actors, preconditions a tester could verify, a numbered main success flow alternating actor action and system response, one alternate flow, one exception flow, and a postcondition. A second use case for a different stakeholder is recommended. A draft is acceptable this week; you revise it in Week 9. -->
+
+<!-- Rubric:
+At least one use case with actor, preconditions, main flow, an exception flow, and a postcondition -->
+
 ## Acceptance Criteria
+
+<!-- MAX TODO -->
+
+<!-- Given / When / Then acceptance criteria. For each use case you submit, write at least one criterion for the main success flow and one for an exception flow. Number them so Week 9 can reference them. Every subjective word, such as fast, easy, or secure, must become a number or an observable condition in the Then. -->
+
+<!-- AC-01.1  Given [starting context or precondition],
+
+         When  [the action the actor takes],
+
+         Then  [the verifiable outcome, with a number where one applies]. -->
+
+<!-- Rubric:
+numbered Given / When / Then criteria with a measurable Then for the main flow and one exception -->
