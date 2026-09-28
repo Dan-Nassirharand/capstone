@@ -109,6 +109,3 @@
   - Given the agent is querying the recipe database in batches,
   - When a batch query exceeds a 30-second timeout or fails mid-run,
   - Then the agent halts the run, checkpoints the last successfully scored batch, and notifies the engineer of the resume point without deleting further records.
-
-<!-- Rubric:
-numbered Given / When / Then criteria with a measurable Then for the main flow and one exception -->
