@@ -53,32 +53,55 @@ flowchart LR
 
 ## 3. Component Responsibility Table
 
-| ID | Component | Responsibility | Interfaces in | Interfaces out | Owner |
-| --- | --- | --- | --- | --- | --- |
-| C1 | PR Review Agent | Posts review comments on a pull request, each citing a knowledge base article. | I1, I2, I4 | I2, I4, I5 | Dan |
-| C2 | Knowledge Base Index | Returns the knowledge base articles relevant to a pull request's changed files. | I2, I3 | I2 | Dan |
-| C3 | Recipe Audit Agent | Flags low-scoring recipes and deletes the ones the engineer confirms. | I6, I7, I8 | I6, I7, I8 | Maxwell |
-| C4 | Recipe Quality Scorer | Scores a recipe from 0 to 100 against the quality ruleset. | I8 | I8 | Maxwell |
+| ID  | Component             | Responsibility                                                                  | Interfaces in | Interfaces out | Owner   |
+| --- | --------------------- | ------------------------------------------------------------------------------- | ------------- | -------------- | ------- |
+| C1  | PR Review Agent       | Posts review comments on a pull request, each citing a knowledge base article.  | I1, I2, I4    | I2, I4, I5     | Dan     |
+| C2  | Knowledge Base Index  | Returns the knowledge base articles relevant to a pull request's changed files. | I2, I3        | I2             | Dan     |
+| C3  | Recipe Audit Agent    | Flags low-scoring recipes and deletes the ones the engineer confirms.           | I6, I7, I8    | I6, I7, I8     | Maxwell |
+| C4  | Recipe Quality Scorer | Scores a recipe from 0 to 100 against the quality ruleset.                      | I8            | I8             | Maxwell |
 
 ---
 
 ## 4. Interface Specification Table
 
-| ID | From → To | Inputs | Outputs | Format | Protocol | On error (handler) |
-| --- | --- | --- | --- | --- | --- | --- |
-| I1 | GitHub → C1 | `pr_number`: int, `repo`: string, `head_sha`: string | none | JSON | HTTPS webhook | Invalid event is ignored and logged (C1). |
-| I2 | C1 ↔ C2 | `changed_files`: string[] | `articles`: {`id`: string, `text`: string}[] | JSON | HTTPS | Index unavailable: PR is labeled "knowledge base unavailable - manual review required" and the author is notified (C1). |
-| I3 | GitHub → C2 | `repo`: string | `docs`: markdown[] | Markdown | GitHub REST API | Sync fails: keep the last good index and retry later (C2). |
-| I4 | C1 ↔ LLM | `diff`: string, `articles`: object[] | `findings`: {`file`: string, `line`: int, `text`: string, `article_id`: string}[] | JSON | HTTPS | Timeout: retry once, then fall back to the manual review label (C1). |
-| I5 | C1 → GitHub | `comments`: {`file`: string, `line`: int, `body`: string}[], `label`: string | `review_id`: int | JSON | GitHub REST API | Post fails: retry, then add the manual review label (C1). |
-| I6 | Engineer ↔ C3 | `start_audit`, `confirm_ids`: string[] | `flagged`: {`recipe_id`: string, `score`: int, `reason`: string}[] | Text | CLI | Invalid input is rejected and nothing is deleted (C3). |
-| I7 | C3 ↔ Recipe DB | `batch_size`: int, `delete_ids`: string[] | `recipes`: {`id`: string, `instructions`: string[], `ingredients`: string[]}[] | JSON | Database SDK | Query takes longer than 30 s: halt, save the last finished batch, and notify the engineer (C3). |
-| I8 | C3 ↔ C4 | `recipe`: object | `score`: int, `defects`: string[] | JSON | Function call | Malformed recipe scores 0 with defect "unparseable" (C4). |
+| ID  | From → To      | Inputs                                                                                                                    | Outputs                                                                           | Format   | Protocol        | On error (handler)                                                                                                      |
+| --- | -------------- | ------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | -------- | --------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| I1  | GitHub → C1    | `pr_number`: int, `repo`: string, `head_sha`: string, `event_type`: "opened" \| "synchronize"                             | none                                                                              | JSON     | HTTPS webhook   | Invalid event is ignored and logged (C1).                                                                               |
+| I2  | C1 ↔ C2        | `changed_files`: string[]                                                                                                 | `articles`: {`id`: string, `text`: string}[]                                      | JSON     | HTTPS           | Index unavailable: PR is labeled "knowledge base unavailable - manual review required" and the author is notified (C1). |
+| I3  | GitHub → C2    | `repo`: string                                                                                                            | `docs`: markdown[]                                                                | Markdown | GitHub REST API | Sync fails: keep the last good index and retry later (C2).                                                              |
+| I4  | C1 ↔ LLM       | `diff`: string, `articles`: object[]                                                                                      | `findings`: {`file`: string, `line`: int, `text`: string, `article_id`: string}[] | JSON     | HTTPS           | Timeout: retry once, then fall back to the manual review label (C1).                                                    |
+| I5  | C1 → GitHub    | `comments`: {`file`: string, `line`: int, `body`: string}[], `label`: string, `status`: "approved" \| "changes_requested" | `review_id`: int                                                                  | JSON     | GitHub REST API | Post fails: retry, then add the manual review label (C1).                                                               |
+| I6  | Engineer ↔ C3  | `start_audit`, `confirm_ids`: string[]                                                                                    | `flagged`: {`recipe_id`: string, `score`: int, `reason`: string}[]                | Text     | CLI             | Invalid input is rejected and nothing is deleted (C3).                                                                  |
+| I7  | C3 ↔ Recipe DB | `batch_size`: int, `delete_ids`: string[]                                                                                 | `recipes`: {`id`: string, `instructions`: string[], `ingredients`: string[]}[]    | JSON     | Database SDK    | Query takes longer than 30 s: halt, save the last finished batch, and notify the engineer (C3).                         |
+| I8  | C3 ↔ C4        | `recipe`: object                                                                                                          | `score`: int, `defects`: string[]                                                 | JSON     | Function call   | Malformed recipe scores 0 with defect "unparseable" (C4).                                                               |
 
 **Example payload (I4, LLM response):**
 
 ```json
-{ "findings": [{ "file": "src/OrderService.java", "line": 42, "text": "Wrap this call in a retry per the team standard.", "article_id": "kb-retry-policy" }] }
+{
+  "findings": [
+    {
+      "file": "src/OrderService.java",
+      "line": 42,
+      "text": "Wrap this call in a retry per the team standard.",
+      "article_id": "kb-retry-policy"
+    }
+  ]
+}
+```
+
+**Example payload (I7, recipe batch, illustrative shape only):**
+
+```json
+{
+  "recipes": [
+    {
+      "id": "r-1024",
+      "instructions": ["<step 1>", "<step 2>", "..."],
+      "ingredients": ["<ingredient>", "..."]
+    }
+  ]
+}
 ```
 
 ---
@@ -95,17 +118,19 @@ flowchart LR
   C2("C2 KB Index"):::built
   LLM["LLM Provider"]:::external
 
-  GH -->|"PR event (raw webhook)"| C1
+  GH -->|"PR opened/updated (raw webhook)"| C1
   C1 -->|"changed files (query)"| C2
   C2 -->|"relevant articles (text)"| C1
   C1 -->|"diff + articles (prompt)"| LLM
   LLM -->|"findings (cited comments)"| C1
-  C1 -->|"inline comments (PR review)"| GH
+  C1 -->|"inline comments + verdict (PR review)"| GH
 
   classDef built fill:#e8f1ff,stroke:#1f4fa3,stroke-width:2px,color:#000;
   classDef external fill:#fff,stroke:#666,stroke-width:2px,stroke-dasharray:6 4,color:#000;
   classDef title fill:#fff7d6,stroke:#b58900,color:#000;
 ```
+
+**Loop:** Each new commit re-fires this flow as a `synchronize` event (I1) against the updated diff; it repeats until C1 posts an `approved` verdict (I5), matching the UC-01 postcondition.
 
 **Timing:** Comments must be posted within 5 minutes of the PR being created (AC-01.1).
 
@@ -140,13 +165,13 @@ flowchart LR
 
 **Pattern:** **Pipeline** governs the PR review flow (event → retrieve → LLM → post). **Client-server** governs the recipe audit, where the engineer is the client of the audit agent.
 
-| Criterion | Justification |
-| --- | --- |
-| Fit to the problem | PR review is a fixed sequence of stages. The audit is a request/response exchange with an engineer confirmation step. |
-| Team skills | Both members have built Java/Python backend services and AWS integrations. |
-| Performance and timing | Both patterns easily meet the 5-minute review and 30-second query limits. |
-| Scalability | Load is one team's PRs plus occasional audits, so simple patterns are enough. |
-| Hardware constraints | None; this is cloud software. |
+| Criterion              | Justification                                                                                                         |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Fit to the problem     | PR review is a fixed sequence of stages. The audit is a request/response exchange with an engineer confirmation step. |
+| Team skills            | Both members have built Java/Python backend services and AWS integrations.                                            |
+| Performance and timing | Both patterns easily meet the 5-minute review and 30-second query limits.                                             |
+| Scalability            | Load is one team's PRs plus occasional audits, so simple patterns are enough.                                         |
+| Hardware constraints   | None; this is cloud software.                                                                                         |
 
 This design also follows our Week 3 security constraint: agents get minimal permissions, and the engineer must confirm every deletion.
 
@@ -156,9 +181,10 @@ This design also follows our Week 3 security constraint: agents get minimal perm
 
 ## 7. Decision Log
 
-| # | Decision | Alternatives | Why chosen |
-| --- | --- | --- | --- |
-| 1 | Engineer must confirm recipe deletions | Agent deletes automatically | UC-02 requires confirmation, and deletion can't be undone. |
-| 2 | Recipe scoring uses fixed rules, not the LLM | LLM scores each recipe | The same recipe always gets the same score, it's testable, and it costs no tokens. |
-| 3 | Only relevant knowledge base articles are sent to the LLM | Send the whole knowledge base | Lower token cost, and each comment can cite a specific article. |
-| 4 | Two separate agents | One agent handles both use cases | The tasks have different risks and permissions, and each owner can work independently. |
+| #   | Decision                                                                       | Alternatives                                                      | Why chosen                                                                                                                                                     |
+| --- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Engineer must confirm recipe deletions                                         | Agent deletes automatically                                       | UC-02 requires confirmation, and deletion can't be undone.                                                                                                     |
+| 2   | Recipe scoring uses fixed rules, not the LLM                                   | LLM scores each recipe                                            | The same recipe always gets the same score, it's testable, and it costs no tokens.                                                                             |
+| 3   | Only relevant knowledge base articles are sent to the LLM                      | Send the whole knowledge base                                     | Lower token cost, and each comment can cite a specific article.                                                                                                |
+| 4   | Two separate agents                                                            | One agent handles both use cases                                  | The tasks have different risks and permissions, and each owner can work independently.                                                                         |
+| 5   | C1 re-runs automatically on every push (`synchronize` event) until it approves | Only review once at PR open; engineer requests re-review manually | UC-01's postcondition needs a final pass/fail outcome, and GitHub already distinguishes `opened` from `synchronize` events, so no extra engineering is needed. |
