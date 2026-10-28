@@ -85,20 +85,20 @@ Work days follow the definitions in Planning Assumptions. Finish includes the bu
 | T7  | Develop the G3 Configuration loader and G4 Logging | Dan     | Jan 28 | 10        | 2 days (20%)   | Feb 12 | T5, T6     | R3         |
 | T8  | Develop the C3 REST API, removal log, exceptions   | Maxwell | Jan 28 | 10        | 2 days (20%)   | Feb 12 | T6         | R2         |
 | T9  | Develop the C3 command-line client                 | Dan     | Jan 28 | 10        | 2 days (20%)   | Feb 12 | T6         | R3         |
-| T10 | Test C3 and C4 end to end                          | Maxwell | Feb 15 | 9         | 1.5 days (17%) | Feb 26 | T7, T8, T9 | R2, R3     |
-| T11 | Validate C1 and C2 with pilot engineers            | Dan     | Feb 15 | 9         | 1.5 days (17%) | Feb 26 | T5, T7     | R1, R7     |
+| T10 | Test C3 and C4 end to end                          | Maxwell | Feb 15 | 8         | 1.5 days (19%) | Feb 26 | T7, T8, T9 | R2, R3     |
+| T11 | Validate C1 and C2 with pilot engineers            | Dan     | Feb 15 | 8         | 1.5 days (19%) | Feb 26 | T5, T7     | R1, R7     |
 | T12 | Validate C3 and C4 with pilot engineers            | Maxwell | Mar 8  | 10        | 2 days (20%)   | Mar 30 | T10, M21   | R3, R7     |
 
-T5 and T6 finish Jan 27 because Jan 18 is a holiday. T12 has no work days in spring break (Mar 15 to 21): its 10 work days are Mar 8 to 12 and Mar 22 to 26, and the buffer is Mar 29 and 30. T10 and T11 end at midday on Feb 26.
+T5 and T6 finish Jan 27 because Jan 18 is a holiday. T12 has no work days in spring break (Mar 15 to 21): its 10 work days are Mar 8 to 12 and Mar 22 to 26, and the buffer is Mar 29 and 30. T10 and T11 have 8 work days (Feb 15 to 19 and Feb 22 to 24) and a 1.5-day buffer (all of Feb 25 and the morning of Feb 26), so they finish at midday on Feb 26.
 
-| Protected block | Dates           | Before                   | Use                                                 |
-| --------------- | --------------- | ------------------------ | --------------------------------------------------- |
-| PB1             | Nov 12 to 17    | M13 Presentation         | Rehearse and finish the video (Nov 11 is a holiday) |
-| PB2             | Nov 30 to Dec 1 | M15 Design Report        | Finish and proofread the report                     |
-| PB3             | Feb 27 to Mar 4 | M21 Beta go/no-go        | Fix T10 and T11 findings; no new tasks              |
-| PB4             | Mar 31 to Apr 5 | M23 Pilot complete       | Write the T11 and T12 results tables                |
-| PB5             | Apr 7 to 21     | M24 Final presentation   | Fix pilot findings and prepare the demo             |
-| PB6             | Apr 23 to 29    | M25 Spring design report | Write the report (includes spring exam week)        |
+| Protected block | Dates           | Before                   | Use                                                           |
+| --------------- | --------------- | ------------------------ | ------------------------------------------------------------- |
+| PB1             | Nov 12 to 17    | M13 Presentation         | Rehearse and finish the video (Nov 11 is a holiday)           |
+| PB2             | Nov 30 to Dec 1 | M15 Design Report        | Finish and proofread the report                               |
+| PB3             | Feb 27 to Mar 4 | M21 Beta go/no-go        | Fix T10 and T11 findings (work days Mar 1 to 4); no new tasks |
+| PB4             | Mar 31 to Apr 5 | M23 Pilot complete       | Write the T11 and T12 results tables                          |
+| PB5             | Apr 7 to 21     | M24 Final presentation   | Fix pilot findings and prepare the demo                       |
+| PB6             | Apr 23 to 29    | M25 Spring design report | Write the report (includes spring exam week)                  |
 
 | No-work period   | Dates            | Effect on the timeline                                     | Risk |
 | ---------------- | ---------------- | ---------------------------------------------------------- | ---- |
