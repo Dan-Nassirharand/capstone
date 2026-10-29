@@ -2,7 +2,7 @@
 
 - **Project:** GE Appliances, a Haier Company: Agentic Upgrades
 - **Team members:** Dan Nassirharand, Maxwell Blevins
-- **Document version:** 1.2 (2026-10-28)
+- **Document version:** 1.3 (2026-10-29)
 - **Companion document:** [Technical_Specification.md](Technical_Specification.md), which traces to this version.
 
 **Contents**
@@ -21,7 +21,15 @@
 
 ## 1. Version and Change Log
 
-**ID rules.** IDs are stable and never reused or renumbered. A dropped requirement stays in its section with the priority "Withdrawn", and the drop is logged here. No requirement is withdrawn as of v1.2. Any change to the text, priority, or verification of a requirement is logged here and raises the version.
+**ID rules.** IDs are stable and never reused or renumbered. A dropped requirement stays in its section with the priority "Withdrawn", and the drop is logged here. No requirement is withdrawn as of v1.3. Any change to the text, priority, or verification of a requirement is logged here and raises the version.
+
+### Version 1.3 (2026-10-29)
+
+Authors: Dan Nassirharand, Maxwell Blevins
+
+- **NFR-11 (text and verification).** "The same flagged set as an uninterrupted run" now means an uninterrupted run over the same recipe data. If a recipe in the re-scored batch changes between the crash and the resume, the run reflects its state at resume. In every case, the flagged list matches `flagged_count`. Verification now repairs a recipe of the interrupted batch before resuming.
+- **Related Technical Specification v1.3 changes** (no other requirement text changed): stale flag rows from an interrupted batch are removed before replay (supports NFR-11), and a per-recipe claim keeps deletion attribution correct when two requests target the same recipe (supports NFR-08, REQ-13).
+- No ID or priority changed.
 
 ### Version 1.2 (2026-10-28)
 
@@ -380,11 +388,11 @@ The system shall let an Engineer who has never used the client start an audit, r
 
 #### NFR-11: Crash recovery (Reliability)
 
-The system shall, after a C3 restart or crash during a run, set the run to HALTED and, on resume, finish with the same flagged set as an uninterrupted run (100%), re-scoring at most one batch.
+The system shall, after a C3 restart or crash during a run, set the run to HALTED and, on resume, finish with the same flagged set as an uninterrupted run over the same recipe data (100%), re-scoring at most one batch. If a recipe in the re-scored batch changes between the crash and the resume, the run reflects the recipe as it is at resume. In every case, the flagged list matches `flagged_count`.
 
 - **Priority:** Should
 - **Source:** US-01, US-03, AC-02.2
-- **Verification:** Test (kill the service mid-run)
+- **Verification:** Test (kill the service mid-run, between a batch's flag writes and its checkpoint; repeat after repairing a flagged recipe of that batch before resuming)
 
 ---
 
