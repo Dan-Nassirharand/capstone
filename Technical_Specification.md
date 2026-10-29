@@ -26,16 +26,21 @@ Each version names the Requirements Document version it traces to. Any later cha
 
 Authors: Dan Nassirharand, Maxwell Blevins
 
-These changes answer five review comments on 3.7 and 3.8. A full review of both documents also found two gaps, which are fixed here: a flagged recipe that was repaired could never leave `PENDING`, and REQ-07 and NFR-11 had wording that did not match the design.
+These changes answer the review comments on 3.5, 3.7, and 3.8. A full review of both documents also found two gaps, which are fixed here: a flagged recipe that was repaired could never leave `PENDING`, and REQ-07 and NFR-11 had wording that did not match the design.
 
 - **Re-traced to Requirements v1.4.** REQ-07 states which recipes `scored_count` leaves out. NFR-11 drops US-03 as a source.
 - **Exact flag counts on retry (3.7).** A flag write now succeeds again for a row of the current batch, so a retry after a lost response no longer fails and under-counts. `flagged_count` grows by the number of distinct recipes the batch flagged.
 - **Final checkpoint leaves `RUNNING` (3.7).** When the cursor is exhausted, the checkpoint also sets `AWAITING_CONFIRMATION` in the same update. Before, a crash between the two writes made resume scan from the beginning and inflate `scored_count`. A completion check after that checkpoint covers a run with nothing to delete.
-- **Complete cleanup before replay (3.7).** The cleanup query is strongly consistent and reads every page before any replay. The resumed worker also waits out a quiet period so a late write from the stopped worker cannot slip in (3.5).
+- **Complete cleanup before replay (3.7).** The cleanup query is strongly consistent and reads every page before any replay.
+- **Store-enforced fencing replaces the quiet period (3.5, 3.7).** No timeout can prove that a stopped worker's write is gone. Every worker write is now conditioned in the store on `status = RUNNING` and the worker's `worker_epoch`, and a resume raises the epoch. A stale write is rejected, so nothing waits for time to pass. The setting `settle_seconds` and the attributes `halted_at` and `claimed_at` are removed.
+- **Constant-time completion check (3.5, 3.8).** `AUDIT_RUN.open_count` holds the number of flag rows still `PENDING` or `DELETING`. It changes in the same transaction as each row's decision, so the check is one item read instead of a scan of the run's flag rows.
+- **Claims are never released on time alone (3.8).** A claim whose delete had an unknown outcome is kept, even if a later attempt is rejected. It is settled from evidence: the recipe is absent, or the same conditional delete is repeated under the claim.
 - **Deletes match what was scored (3.8).** The delete is conditional on the recipe's `steps` and `ingredients` equalling what was scored. A recipe repaired after the re-score is not deleted. Added the decision `RESOLVED` for a flagged recipe that is repaired or already gone; without it, such a recipe stayed `PENDING` and the run could never complete.
-- **Unknown delete outcome (3.8).** A timeout or lost response keeps the claim and removal-log row, and a reconciliation step settles them. Only a definitive rejection releases the claim, so a recipe that was actually deleted never loses its attribution.
-- **Added:** optional `not_deleted` in the deletions response, event `RECIPE_DELETE_UNCERTAIN`, and the attributes `halted_at`, `claimed_at`, and the setting `settle_seconds`.
-- **Supersedes** the v1.3 "Flag writes" and "Resume" rules in 3.7, the delete, release, and orphaned-claim rules in 3.8, and the D1 part 3 audit loop, which set `AWAITING_CONFIRMATION` in a separate step after the cursor was exhausted.
+- **Unknown delete outcome (3.8).** A timeout or lost response keeps the claim and removal-log row, and a reconciliation step settles them. Only a definitive rejection of a claim with no earlier uncertain attempt releases it, so a recipe that was actually deleted never loses its attribution.
+- **Delete condition handles missing fields (3.8).** A missing `steps` or `ingredients` is compared with `attribute_not_exists`, so an unchanged `UNPARSEABLE` recipe can be deleted.
+- **Request budget (3.2, 3.8).** A deletions request stops starting IDs at a 20-second deadline, below the 29-second gateway limit, and reports the rest as `NOT_ATTEMPTED`.
+- **Added:** optional `not_deleted` in the deletions response, reason `NOT_ATTEMPTED`, event `RECIPE_DELETE_UNCERTAIN`, and the attributes `worker_epoch`, `open_count`, `snapshot_hash`, and `outcome`.
+- **Supersedes** the v1.3 "Flag writes" and "Resume" rules in 3.7, the delete, release, and orphaned-claim rules in 3.8, the D2 F2 deletion step list (log write, delete, mark `DELETED`), and the D1 part 3 audit loop, which set `AWAITING_CONFIRMATION` in a separate step after the cursor was exhausted.
 
 ### Version 1.3 (2026-10-29), traces to Requirements v1.3
 
@@ -154,7 +159,7 @@ I1 to I8 are from [D0 part 4](Design_Diagrams/D0_High_Level_Design.md#4-interfac
 
 #### I7: C3 → Recipe Database
 
-- **Inputs:** `cursor` string; for a deletion check, `recipeId` (strongly consistent read); for a delete, {`recipeId`, `steps`, `ingredients`} (the delete applies only if both fields still equal these values, 3.8). Batch size and timeout come from configuration.
+- **Inputs:** `cursor` string; for a deletion check, `recipeId` (strongly consistent read); for a delete, {`recipeId`, `steps`, `ingredients`} (the delete applies only if the item exists and each field still equals the value scored, or is still missing if it was missing, 3.8). Batch size and timeout come from configuration.
 - **Outputs:** `recipes` {`recipeId`, `title`, `steps`, `ingredients`, `domains`, `cooktime`}[], `next_cursor` string.
 - **On error:** a read over 30 s or a failed read sets the run to HALTED (`BATCH_TIMEOUT` or `DB_ERROR`), leaves `last_cursor` unchanged, and stops further deletion. Access denied: HALTED (`ACCESS_DENIED`).
 
@@ -168,12 +173,12 @@ I1 to I8 are from [D0 part 4](Design_Diagrams/D0_High_Level_Design.md#4-interfac
 
 - **Operations:**
   - Start a run and acquire the active-run lock (one transaction, 3.5)
-  - Resume a run (conditional status update, 3.5), then clean up uncommitted flag rows (3.7)
-  - Write a checkpoint (conditional on `status = RUNNING` and `checkpoint_seq`; the last one also sets `AWAITING_CONFIRMATION`, 3.7)
-  - Write flags (conditional on the row being absent or from the current batch, 3.7)
+  - Resume a run (conditional status update that raises `worker_epoch`, 3.5), then clean up uncommitted flag rows (3.7)
+  - Write a checkpoint (conditional on `status = RUNNING`, `worker_epoch`, and `checkpoint_seq`; the last one also sets `AWAITING_CONFIRMATION`, 3.7)
+  - Write flags (one transaction: a fencing check on `AUDIT_RUN` and a put conditional on the row being absent or from the current batch, 3.7)
   - Load exceptions
   - Claim a recipe and write its removal log (one transaction, 3.8)
-  - Finalize a claimed recipe as deleted, or release or reconcile the claim (3.8)
+  - Finish a flag row and adjust `open_count` (one transaction), or release or reconcile a claim (3.8)
   - Complete a run and release the lock (one transaction, 3.5)
 - **Outputs:** the stored items in 3.4.
 - **On error:** `STORE_ERROR`: a running audit is HALTED and deletion is refused. If the claim and removal-log transaction fails, the recipe is not deleted. A held lock returns 409 `RUN_IN_PROGRESS`.
@@ -189,7 +194,7 @@ I1 to I8 are from [D0 part 4](Design_Diagrams/D0_High_Level_Design.md#4-interfac
 - **Fields (allowlist):**
   - On every entry: `timestamp`, `component`, `level`, `event`, `correlation_id` (`run_id` or `pr_number`), `error_code`.
   - On deletion events, also required: `confirmed_by` (the verified IAM principal ARN of the caller, 3.6) and `recipe_id`.
-- **Deletion events:** `RECIPE_DELETED`, `RECIPE_DELETE_SKIPPED`, `RECIPE_DELETE_FAILED`, `RECIPE_DELETE_UNCERTAIN`, and `LOG_WRITE_FAILED`. Each has `correlation_id` set to the `run_id`. `RECIPE_DELETE_SKIPPED` carries `error_code` `CLAIMED_ELSEWHERE`, `NO_LONGER_ELIGIBLE`, `RECIPE_CHANGED`, or `RECIPE_ABSENT` (3.8). `confirmed_by` is always the holder of the claim that the event reports on.
+- **Deletion events:** `RECIPE_DELETED`, `RECIPE_DELETE_SKIPPED`, `RECIPE_DELETE_FAILED`, `RECIPE_DELETE_UNCERTAIN`, and `LOG_WRITE_FAILED`. Each has `correlation_id` set to the `run_id`. `RECIPE_DELETE_SKIPPED` carries `error_code` `CLAIMED_ELSEWHERE`, `NO_LONGER_ELIGIBLE`, `RECIPE_CHANGED`, or `RECIPE_ABSENT` (3.8). IDs reported as `NOT_ATTEMPTED` have no event, because nothing was done for them. `confirmed_by` is always the holder of the claim that the event reports on.
 - **Interface:** `log(event, level, correlation_id, error_code, confirmed_by, recipe_id)`. The last two are null except on deletion events.
 - **Excluded:** recipe content and credentials. A principal ARN and a recipe ID are identifiers, not content (D2 EC-36).
 - **On error:** a logging failure never fails the caller; entries go to local output. G4 is distinct from the removal log.
@@ -220,12 +225,12 @@ All endpoints use HTTPS and JSON, have the `/v1` prefix, and require SigV4. The 
 
 - **Input:** `recipeIds` string[] (1 to 200), `reason` string (1 to 500 characters).
 - **Success:** 200 with `excepted_ids`.
-- **Errors:** 400 `INVALID_REQUEST`; 404 `RUN_NOT_FOUND`; 422 `RECIPE_NOT_FLAGGED`.
+- **Errors:** 400 `INVALID_REQUEST`; 404 `RUN_NOT_FOUND`; 409 `RUN_NOT_AWAITING_CONFIRMATION`; 422 `RECIPE_NOT_FLAGGED`.
 
 #### `POST /v1/audit-runs/{run_id}/deletions`: delete confirmed recipes
 
 - **Input:** `recipeIds` string[] (1 to 200). There is no confirmer field; the confirmer is the verified caller (3.6).
-- **Success:** 200 with `deleted_count`, `deleted_ids`, and, when any ID was not deleted, `not_deleted` (each ID with a reason: `CLAIMED_ELSEWHERE`, `NO_LONGER_ELIGIBLE`, `RECIPE_CHANGED`, `RECIPE_ABSENT`, `DELETE_FAILED`, or `OUTCOME_UNKNOWN`). IDs that were not deleted can be retried (3.8); an `OUTCOME_UNKNOWN` ID is settled by the retry or by recovery, never deleted twice.
+- **Success:** 200 with `deleted_count`, `deleted_ids`, and, when any ID was not deleted, `not_deleted` (each ID with a reason: `CLAIMED_ELSEWHERE`, `NO_LONGER_ELIGIBLE`, `RECIPE_CHANGED`, `RECIPE_ABSENT`, `DELETE_FAILED`, `OUTCOME_UNKNOWN`, or `NOT_ATTEMPTED`). IDs that were not deleted can be retried (3.8); an `OUTCOME_UNKNOWN` ID is settled by a retry or by startup recovery, which repeats the same conditional delete under the original claim, so the recipe is credited to one Engineer only. The request has a 20-second budget (3.8), below the 29-second gateway limit. IDs not started when it ends are returned as `NOT_ATTEMPTED`, so the response always arrives with a complete result.
 - **Errors:** 400 `INVALID_REQUEST`; 403 `FORBIDDEN` (no verified caller identity, 3.6); 404 `RUN_NOT_FOUND`; 409 `RUN_NOT_AWAITING_CONFIRMATION`; 422 `RECIPE_NOT_DELETABLE`; 503 `LOG_WRITE_FAILED` (only if nothing was deleted).
 
 **CLI mapping.** The CLI maps these to `audit start`, `audit status`, `audit resume`, `audit except`, and `audit delete` ([D2 part 2.2](Design_Diagrams/D2_Detailed_Design.md)). `audit delete` asks the Engineer to type `yes` before any request is sent, then prints the count deleted and each ID that was not deleted with its reason (`not_deleted`, 3.2).
@@ -321,7 +326,8 @@ All endpoints use HTTPS and JSON, have the `/v1` prefix, and require SigV4. The 
                   "RECIPE_CHANGED",
                   "RECIPE_ABSENT",
                   "DELETE_FAILED",
-                  "OUTCOME_UNKNOWN"
+                  "OUTCOME_UNKNOWN",
+                  "NOT_ATTEMPTED"
                 ]
               }
             }
@@ -350,8 +356,8 @@ Entity attributes and relationships are in the [D1 data model](Design_Diagrams/D
 #### `AUDIT_RUN`
 
 - **Keys:** partition `run_id`; no sort key.
-- **Attributes:** `status`, `threshold`, `ruleset_version`, `started_by` (verified caller, 3.6), `started_at` (ISO 8601 UTC), `last_cursor`, `checkpoint_seq` (number of committed batches, 3.7), `scored_count`, `flagged_count`, `halt_reason`, `halted_at` (ISO 8601 UTC, set when the run becomes `HALTED`, 3.7).
-- **Access:** created in the start transaction with the lock (3.5); checkpoint updates are conditional on `status = RUNNING` and the previous `checkpoint_seq` (3.7).
+- **Attributes:** `status`, `threshold`, `ruleset_version`, `started_by` (verified caller, 3.6), `started_at` (ISO 8601 UTC), `last_cursor`, `checkpoint_seq` (number of committed batches, 3.7), `scored_count`, `flagged_count`, `halt_reason`, `worker_epoch` (starts at 1; a resume adds 1, 3.5), and `open_count` (flag rows still `PENDING` or `DELETING`; starts at 0, 3.8).
+- **Access:** created in the start transaction with the lock (3.5); checkpoint updates are conditional on `status = RUNNING`, `worker_epoch`, and the previous `checkpoint_seq` (3.7). `open_count` changes only with a checkpoint (adds the batch's flagged count) or in the same transaction as a flag row's decision (3.8).
 
 #### `ACTIVE_RUN_LOCK`
 
@@ -362,8 +368,8 @@ Entity attributes and relationships are in the [D1 data model](Design_Diagrams/D
 #### `FLAGGED_RECIPE`
 
 - **Keys:** partition `run_id`, sort `recipeId`.
-- **Attributes:** `title`, `score`, `defects`, `decision` (`PENDING`, `DELETING`, `EXCEPTED`, `DELETED`, or `RESOLVED`), `batch_seq` (the batch that wrote the row, 3.7), `claim_id`, `claimed_by`, and `claimed_at` (set only while a deletion claim is held or after it succeeds, 3.8).
-- **Access:** one query returns a run's flags. Written only if absent or from the current batch (3.7). `decision` changes only through conditional updates on its current value (3.8). `RESOLVED` means the recipe was repaired or was already gone, so nothing is left to delete.
+- **Attributes:** `title`, `score`, `defects`, `decision` (`PENDING`, `DELETING`, `EXCEPTED`, `DELETED`, or `RESOLVED`), `batch_seq` (the batch that wrote the row, 3.7), `claim_id`, `claimed_by`, and `snapshot_hash` (set only while a deletion claim is held or after it ends in `DELETED` or an unconfirmed `RESOLVED`; `snapshot_hash` is a SHA-256 of the original DynamoDB values of `steps` and `ingredients` as scored, with a marker for a missing field, 3.8).
+- **Access:** one query returns a run's flags. Written only if absent or from the current batch, and only by the current worker (3.7). `decision` changes only through conditional updates on its current value (3.8). `RESOLVED` means the recipe was repaired or was already gone, or it changed after a delete whose outcome could not be confirmed, so nothing more is deleted for it.
 
 #### `KEEP_EXCEPTION`
 
@@ -374,14 +380,14 @@ Entity attributes and relationships are in the [D1 data model](Design_Diagrams/D
 #### `REMOVAL_LOG`
 
 - **Keys:** partition `run_id`, sort `recipeId`.
-- **Attributes:** `score`, `defects`, `confirmed_by` (verified IAM principal ARN of the deletion request, 3.6), `claim_id` (the claim that wrote the row, 3.8), `removed_at` (ISO 8601 UTC, set when the claim is made, before the delete).
-- **Access:** written only if absent, in the same transaction as the claim and before the delete. Removed only when that claim is released (3.8).
+- **Attributes:** `score`, `defects`, `confirmed_by` (verified IAM principal ARN of the deletion request, 3.6), `claim_id` (the claim that wrote the row, 3.8), `removed_at` (ISO 8601 UTC, set when the claim is made, before the delete), and `outcome` (set only to `UNCONFIRMED`, when a delete of unknown outcome ended with the recipe present and changed, 3.8).
+- **Access:** written only if absent, in the same transaction as the claim and before the delete. Removed only when that claim is released, which never happens after a delete attempt of unknown outcome (3.8).
 
 #### Recipe Database (external)
 
 - **Keys:** partition `recipeId`; no sort key.
 - **Attributes:** `title`, `steps`, `ingredients`, `domains`, `cooktime` (minutes). C3 reads and deletes; it stores no copy.
-- **Access:** paged reads by `cursor`; strongly consistent read by ID for a deletion check; delete by ID, conditional on `steps` and `ingredients` (3.8).
+- **Access:** paged reads by `cursor`; strongly consistent read by ID for a deletion check; delete by ID, conditional on the item existing and on `steps` and `ingredients` (3.8).
 
 **Ruleset.** The ruleset is a version-controlled file, not a table: `RULESET` {`version`, `default_threshold`} contains `RULE` {`rule_id`, `field`, `check`, `penalty`} ([D2 F3](Design_Diagrams/D2_Detailed_Design.md#23-c4-recipe-quality-scorer)).
 
@@ -392,30 +398,36 @@ W-08 and A-05 allow one audit run at a time. A DynamoDB conditional write checks
 **Admission (start).** `POST /v1/audit-runs` writes two items in one `TransactWriteItems` call:
 
 1. Put the `ACTIVE_RUN_LOCK` item, on condition `attribute_not_exists(lock_id)`.
-2. Put the `AUDIT_RUN` item with status `RUNNING`, on condition `attribute_not_exists(run_id)`.
+2. Put the `AUDIT_RUN` item with status `RUNNING`, `worker_epoch` 1, and `open_count` 0, on condition `attribute_not_exists(run_id)`.
 
 Both items are written or neither is. Every start writes the same lock key, so DynamoDB admits at most one, whatever thread or instance sends it. If the lock condition fails, or the transaction is cancelled by a conflicting start, nothing is written and the caller gets 409 `RUN_IN_PROGRESS`, with the lock holder's `run_id` in the message. The scoring worker starts only after the transaction succeeds.
 
-**Resume.** `POST .../resume` changes the status with a conditional update from `HALTED` to `RUNNING`. Of two concurrent resumes, one succeeds and the other gets 409 `RUN_NOT_HALTED`, so at most one worker runs per run. The lock is not touched; it already belongs to this run.
+**Resume.** `POST .../resume` changes the status with a conditional update from `HALTED` to `RUNNING`, and adds 1 to `worker_epoch` in the same update. Of two concurrent resumes, one succeeds and the other gets 409 `RUN_NOT_HALTED`, so at most one worker runs per run. The new worker uses the epoch the update returns. The lock is not touched; it already belongs to this run.
 
-**Worker writes.** Every checkpoint write by the audit loop is conditional on `status = RUNNING`. A worker whose run was halted, for example by restart recovery, fails its next checkpoint write and stops without changing the run. Any flag rows it wrote for that batch are uncommitted; the next resume deletes them before re-scoring the batch (3.7). A worker that halts its own run sets `HALTED` and `halted_at` only after its outstanding calls have returned or timed out, and the resumed worker waits out the quiet period (below) before its cleanup.
+**Worker fencing.** No timeout can prove that a stopped worker's in-flight write is gone, so the store rejects stale writes instead. The run's `worker_epoch` identifies the current worker, and every write by the audit loop is conditioned on `status = RUNNING` and `worker_epoch` equal to the worker's own value:
 
-**Quiet period.** The setting `settle_seconds` (G3, default 60) must exceed the SDK `apiCallTimeout` (default 10 s) and the ECS stop timeout (default 30 s). Once that long has passed since a worker stopped, no write it issued can still be applied. Replay cleanup (3.7) and claim recovery (3.8) wait for it.
+- A checkpoint carries the condition in its update (3.7).
+- A flag write is one `TransactWriteItems` call: a `ConditionCheck` of the condition on `AUDIT_RUN`, and the put of the flag row (3.7).
+- A worker that halts its own run does so with an update under the same condition.
 
-**Release.** The lock is held while the run is `RUNNING`, `HALTED`, or `AWAITING_CONFIRMATION`, because a run in any of these states can still delete recipes. It is released only in the transaction that completes the run, once no flag row is `PENDING` or `DELETING` (3.8). The completion check is one strongly consistent query that reads every page. It runs after the final checkpoint, at the end of every deletion or exceptions request, and at startup recovery. Once the run is `AWAITING_CONFIRMATION`, no new flag rows appear, and rows only move out of `PENDING` or `DELETING`, except when a released claim returns a row to `PENDING`. That release is itself followed by a check, so a run is never left open with nothing to trigger its completion.
+A run halted by restart recovery or by its own worker fails every later write from that worker. A resume raises the epoch, so a worker from an earlier epoch still fails once the run is `RUNNING` again. A write either commits before the status change, and the resume cleanup (3.7) sees it, or is rejected. Nothing waits for time to pass.
+
+**Release.** The lock is held while the run is `RUNNING`, `HALTED`, or `AWAITING_CONFIRMATION`, because a run in any of these states can still delete recipes. It is released only in the transaction that completes the run, once `open_count` is 0 (3.8). The completion check is one strongly consistent read of the `AUDIT_RUN` item, whatever the number of flagged recipes. It runs after the final checkpoint, after every deletion or exceptions request that finished a row, and at startup recovery. `open_count` falls only in the same transaction that moves a row to `DELETED`, `EXCEPTED`, or `RESOLVED`, and rows reach those states only after the run is `AWAITING_CONFIRMATION`, because deletions and exceptions are refused before then and no new flag rows appear after it. A run is therefore never left open with nothing to trigger its completion.
 
 The completion transaction has two steps:
 
-1. Update `AUDIT_RUN` to `COMPLETE`, on condition `status = AWAITING_CONFIRMATION`.
+1. Update `AUDIT_RUN` to `COMPLETE`, on condition `status = AWAITING_CONFIRMATION` and `open_count = 0`.
 2. Delete the `ACTIVE_RUN_LOCK` item, on condition that its `run_id` is this run.
+
+The condition on `open_count` makes a stale check harmless: the transaction is cancelled if a row is still open.
 
 The lock has no expiry. A time-based lease could lapse while a run is legitimately halted or awaiting confirmation, and then admit a second run.
 
-**Restart recovery.** The lock lives in DynamoDB, not in memory, so it survives a crash or restart. On startup, C3 waits out the quiet period without serving requests. It then sets any `RUNNING` run to `HALTED` (`RESTART`) with a conditional update and leaves the lock with that run. It reconciles the deletion claims the crash left behind (3.8), runs the completion check, and only then serves requests. No new run can start until the Engineer resumes the halted run and it completes. The lock and the run's status change only in the same transactions, so a crash cannot leave them in disagreement.
+**Restart recovery.** The lock lives in DynamoDB, not in memory, so it survives a crash or restart. On startup, C3 sets any `RUNNING` run to `HALTED` (`RESTART`) with a conditional update and leaves the lock with that run. Worker fencing rejects any write the previous task still has in flight, so recovery does not wait. C3 then reconciles the deletion claims the crash left behind (3.8), runs the completion check, and serves requests. A claim that reconciliation cannot settle stays `DELETING` and keeps the run open until a later request settles it (3.8). No new run can start until the Engineer resumes the halted run and it completes. The lock and the run's status change only in the same transactions, so a crash cannot leave them in disagreement.
 
-**Deployments.** The ECS service runs one task with `deployment_minimum_healthy_percent = 0` and `deployment_maximum_percent = 100`, so the old task stops before the new one starts. Without this, the new task's startup recovery could halt a run the old task is still scoring. The quiet period then covers any write the old task had in flight.
+**Deployments.** The ECS service runs one task with `deployment_minimum_healthy_percent = 0` and `deployment_maximum_percent = 100`, so the old task stops before the new one starts. This keeps one instance serving deletion requests, which the claim ownership check in 3.8 relies on. Stale audit writes from the old task are rejected by worker fencing whatever the deployment timing.
 
-**Limit.** An abandoned run blocks new runs until it is completed, that is, until every flagged recipe is deleted, kept, or resolved. This release has no cancel operation (5.2).
+**Limit.** An abandoned run blocks new runs until it is completed, that is, until every flagged recipe is deleted, kept, or resolved. A claim whose delete outcome cannot be established, for example because access is denied on every attempt, also keeps the run open until the cause is fixed and a retry settles it. This release has no cancel operation (5.2).
 
 ### 3.6 Caller identity and deletion attribution
 
@@ -436,34 +448,35 @@ NFR-08 requires every deletion to name its confirmer and its run in both the rem
 
 **Batch tagging.** `AUDIT_RUN.checkpoint_seq` counts committed batches and starts at 0. The worker tags every flag row it writes with `batch_seq = checkpoint_seq + 1`. Any row with `batch_seq` greater than `checkpoint_seq` belongs to the uncommitted batch.
 
-**Flag writes.** Each flag row is put on condition `attribute_not_exists(recipeId) OR batch_seq = :current`, where `:current` is `checkpoint_seq + 1`. The worker keeps the set of recipe IDs it has flagged in this batch.
+**Flag writes.** Each flag is written with one `TransactWriteItems` call of two items: a `ConditionCheck` on `AUDIT_RUN` (`status = RUNNING` and `worker_epoch` equal to the worker's, 3.5), and a put of the row on condition `attribute_not_exists(recipeId) OR batch_seq = :current`, where `:current` is `checkpoint_seq + 1`. The worker keeps the set of recipe IDs it has flagged in this batch. The cancellation reasons say which condition failed:
 
-- **Condition passes:** the row is written, and the ID is added to the set. A retry after a lost response writes the same row again, because the first write is a row of the current batch, so a retry never fails on its own earlier write.
-- **Condition fails:** the recipe was already flagged by a committed batch (a duplicate across pages, D1 part 3). It is skipped and not counted.
+- **Both pass:** the row is written, and the ID is added to the set. A retry after a lost response writes the same row again, because the first write is a row of the current batch, so a retry never fails on its own earlier write.
+- **The `AUDIT_RUN` check fails:** this worker is fenced out. It stops and writes nothing more.
+- **The row condition fails:** the recipe was already flagged by a committed batch (a duplicate across pages, D1 part 3). It is skipped and not counted.
 
 The batch's count is the size of the set, so a recipe that is written twice is counted once.
 
-**Checkpoint.** One conditional update on `AUDIT_RUN`, on condition `status = RUNNING` and `checkpoint_seq` equal to the value the batch started with. It sets these fields:
+**Checkpoint.** One conditional update on `AUDIT_RUN`, on condition `status = RUNNING`, `worker_epoch` equal to the worker's, and `checkpoint_seq` equal to the value the batch started with. It sets these fields:
 
 - `last_cursor` to the batch's `next_cursor`
 - `checkpoint_seq` to the previous value plus 1
 - `scored_count` to the previous value plus the recipes the batch scored
 - `flagged_count` to the previous value plus the size of the batch's set
+- `open_count` to the previous value plus the size of the batch's set (every new flag row is `PENDING`)
 - `status` to `AWAITING_CONFIRMATION`, only in the final checkpoint, when `next_cursor` is empty (an empty batch is the last batch, D1 part 3)
 
 The final checkpoint leaves `RUNNING` in the same update that saves the exhausted cursor. A crash can then never leave a run `RUNNING` with a finished cursor, which a resume would scan again from the start. The worker then runs the completion check (3.5), which completes a run that has nothing flagged.
 
 **Resume.** On every resume, whatever the halt reason, the worker does these steps before it reads any recipe:
 
-1. Wait until `settle_seconds` have passed since `halted_at` (3.5). A resume after a restart has already waited.
-2. Query the run's `FLAGGED_RECIPE` rows with a strongly consistent read (`ConsistentRead`), filtered to `batch_seq` greater than `checkpoint_seq`. Follow `LastEvaluatedKey` until it is empty. The filter is applied after each page is read, so a page can be empty while later pages are not. Collect every matching row before step 3.
-3. Delete each collected row, on condition that `batch_seq` is still greater than `checkpoint_seq`.
-4. Reload the keep exception list.
-5. Read from `last_cursor` and score as normal.
+1. Query the run's `FLAGGED_RECIPE` rows with a strongly consistent read (`ConsistentRead`), filtered to `batch_seq` greater than `checkpoint_seq`. Follow `LastEvaluatedKey` until it is empty. The filter is applied after each page is read, so a page can be empty while later pages are not. Collect every matching row before step 2.
+2. Delete each collected row, on condition that `batch_seq` is still greater than `checkpoint_seq`.
+3. Reload the keep exception list.
+4. Read from `last_cursor` and score as normal.
 
-Step 2 reads the base table, which supports strong consistency; a secondary index would not. A row written just before the crash is therefore always found, so no uncommitted row can become visible at a later checkpoint without being counted. These rows are always `PENDING`, because deletions are refused until the run is `AWAITING_CONFIRMATION` (D2 F2).
+The resume update has already raised `worker_epoch` (3.5), so no write from an earlier worker can land after step 1: the store rejects it. A write that committed before the resume is found by step 1. Step 1 reads the base table, which supports strong consistency; a secondary index would not. No uncommitted row can therefore become visible at a later checkpoint without being counted. These rows are always `PENDING`, because deletions are refused until the run is `AWAITING_CONFIRMATION` (D2 F2), and they were never added to `open_count`.
 
-**Invariant.** After every checkpoint, `flagged_count` equals the number of the run's `FLAGGED_RECIPE` rows with `batch_seq` up to `checkpoint_seq`. The status endpoint lists only those rows, so the list and the count agree even while a batch is in progress.
+**Invariant.** After every checkpoint, `flagged_count` equals the number of the run's `FLAGGED_RECIPE` rows with `batch_seq` up to `checkpoint_seq`. The status endpoint lists only those rows, so the list and the count agree even while a batch is in progress. Likewise `open_count` equals the number of those rows whose `decision` is `PENDING` or `DELETING`.
 
 **What NFR-11 guarantees.** A resume re-scores only the uncommitted batch (at most one), using the recipe data as it is at resume.
 
@@ -479,13 +492,17 @@ Recipes in committed batches are not re-read. If one of them changes after it wa
 
 **Check.** For each ID, C3 first reads the recipe with a strongly consistent read and re-scores it, after re-checking the exception list (D2 F2).
 
-- **Recipe absent:** set the row to `RESOLVED` (on condition `decision = PENDING`) and skip the ID with `RECIPE_ABSENT`.
-- **No longer below the threshold:** set the row to `RESOLVED` the same way and skip the ID with `NO_LONGER_ELIGIBLE`.
-- **Still below:** keep the `steps` and `ingredients` it read, and the score and defects, for the claim and the delete.
+- **Recipe absent:** finish the row as `RESOLVED` (on condition `decision = PENDING`) and skip the ID with `RECIPE_ABSENT`.
+- **No longer below the threshold:** finish the row as `RESOLVED` the same way and skip the ID with `NO_LONGER_ELIGIBLE`.
+- **Still below:** keep the `steps` and `ingredients` it read exactly as DynamoDB returned them (each with its attribute type, or noted as missing), and the score and defects, for the claim and the delete.
+
+**Finishing a row.** Every move of a flag row out of `PENDING` or `DELETING` into `DELETED`, `EXCEPTED`, or `RESOLVED` is one `TransactWriteItems` call: the conditional update of the row, and an update of `AUDIT_RUN` that adds -1 to `open_count`, on condition `open_count > 0`. The counter therefore moves exactly once per row. A retry after a lost response either finds the row already in the target state, which counts as done, or fails the row's condition without touching the counter. After a finish, the request runs the completion check (3.5).
+
+**Request budget.** A deletions request has a deadline of 20 seconds from its start, below the 29-second gateway limit. Every store call is given a timeout of the smaller of 3 seconds and the time left, and no call starts after the deadline, except the one finish or release call (3 seconds at most) that closes the ID in progress. C3 starts an ID only if at least 5 seconds remain. IDs not started are returned in `not_deleted` as `NOT_ATTEMPTED`; nothing was claimed or changed for them, and they can be retried. If the deadline passes after the claim but before the delete is sent, nothing was applied, so the claim is released and the ID is reported as `NOT_ATTEMPTED`; if that release fails, the row stays `DELETING` and reconciliation settles it. A delete still in flight at the deadline is an unknown outcome (below). The response leaves C3 about 23 seconds after the request started, before the gateway limit, with a result for every ID.
 
 **Claim.** C3 makes one `TransactWriteItems` call on the audit tables:
 
-1. Update the `FLAGGED_RECIPE` row: set `decision = DELETING`, `claim_id` to a value unique to this request (the API Gateway request ID), `claimed_by` to the confirmer (3.6), and `claimed_at` to now. Condition: `decision = PENDING`.
+1. Update the `FLAGGED_RECIPE` row: set `decision = DELETING`, `claim_id` to a value unique to this request (the API Gateway request ID), `claimed_by` to the confirmer (3.6), and `snapshot_hash` to the hash of the `steps` and `ingredients` read in the check. Condition: `decision = PENDING`.
 2. Put the `REMOVAL_LOG` row with the score and defects from the check, `confirmed_by`, and `claim_id`. Condition: `attribute_not_exists(recipeId)`.
 
 The outcome decides what happens next:
@@ -494,36 +511,36 @@ The outcome decides what happens next:
 - **Cancelled on a condition:** another request holds the claim, or the row is already `DELETED`, `EXCEPTED`, or `RESOLVED`. If the row is `DELETING` and no request on this instance holds its claim, C3 reconciles it first (below). Otherwise the ID is skipped with `CLAIMED_ELSEWHERE`.
 - **Store failure:** the D2 F2 log-write-failure path applies. The loop stops, and the request returns 503 `LOG_WRITE_FAILED` if nothing was deleted.
 
-**Delete.** The claim holder deletes the recipe from the Recipe Database (I7) with a conditional delete. The condition is that `steps` and `ingredients` equal the values read in the check, so a recipe repaired after it was scored is not deleted. A delete that returns the failed item (`ReturnValuesOnConditionCheckFailure = ALL_OLD`) lets C3 see what changed. The delete is safe to repeat, because the same condition applies each time. Transient errors are retried up to 3 times with backoff. The outcome falls into one of these cases:
+**Delete.** The claim holder deletes the recipe from the Recipe Database (I7) with a conditional delete. The condition requires `attribute_exists(recipeId)` and, for each of `steps` and `ingredients`, an exact match to the scored snapshot: the original DynamoDB value if the field was present, or `attribute_not_exists(field)` if it was missing. A recipe repaired after it was scored is therefore not deleted, and an unchanged `UNPARSEABLE` recipe (3.1, a missing field) can be. A delete that returns the failed item (`ReturnValuesOnConditionCheckFailure = ALL_OLD`) lets C3 see what changed. The delete is safe to repeat, because the same condition applies each time. Transient errors are retried with backoff within the request budget. The outcome falls into one of these cases. An earlier attempt of this request is *uncertain* if it ended in a timeout, a server error, a lost connection, or the deadline.
 
-- **Delete succeeds:** update the row to `decision = DELETED`, on condition `claim_id` equals this request's. Emit `RECIPE_DELETED`. If that update fails, the row stays `DELETING` with the correct attribution, and reconciliation finishes it (below).
-- **Condition fails and the recipe is present (it changed):** nothing was deleted, so this is a definitive rejection. Re-score the returned item. Release the claim (below), with the row set to `PENDING` and the new score and defects if it is still below the threshold, or to `RESOLVED` if it is not. Skip the ID with `RECIPE_CHANGED` or `NO_LONGER_ELIGIBLE`.
-- **Condition fails and the recipe is absent:** if an earlier attempt of this request had an unknown outcome, that attempt applied, so finalize as `DELETED` as above. Otherwise the recipe was gone before the delete: release the claim with the row set to `RESOLVED`, and skip the ID with `RECIPE_ABSENT`.
-- **Other definitive rejection** (for example access denied or a validation error): release the claim with the row back to `PENDING`, and emit `RECIPE_DELETE_FAILED`.
-- **Unknown outcome after the retries** (a timeout, a server error, or a lost connection): the delete may have been applied. Keep the claim, the `DELETING` row, and the removal-log row exactly as they are. Emit `RECIPE_DELETE_UNCERTAIN`, leave the ID out of `deleted_ids`, and report it in `not_deleted` as `OUTCOME_UNKNOWN`. Reconciliation settles it (below).
+- **Delete succeeds:** finish the row as `DELETED` (above), on condition `claim_id` equals this request's. Emit `RECIPE_DELETED`. If that transaction fails, the row stays `DELETING` with the correct attribution, and reconciliation finishes it (below).
+- **Condition fails and the recipe is present (it changed):** if no earlier attempt was uncertain, nothing was deleted, so this is a definitive rejection. Re-score the returned item. Release the claim (below), with the row set to `PENDING` and the new score and defects if it is still below the threshold, or to `RESOLVED` if it is not. Skip the ID with `RECIPE_CHANGED` or `NO_LONGER_ELIGIBLE`. If an earlier attempt was uncertain, follow the unknown-outcome path below.
+- **Condition fails and the recipe is absent:** if an earlier attempt of this request was uncertain, that attempt applied, so finish as `DELETED` as above. Otherwise the recipe was gone before the delete: release the claim with the row set to `RESOLVED`, and skip the ID with `RECIPE_ABSENT`.
+- **Other definitive rejection** (for example access denied or a validation error): if no earlier attempt was uncertain, release the claim with the row back to `PENDING`, and emit `RECIPE_DELETE_FAILED`; the ID is reported as `DELETE_FAILED`. Otherwise follow the unknown-outcome path below. The rejection of a later attempt does not show what happened to an earlier one.
+- **Unknown outcome** (an uncertain final attempt, or one of the two cases above after an uncertain attempt): the delete may have been applied. Keep the claim, the `DELETING` row, and the removal-log row exactly as they are. Emit `RECIPE_DELETE_UNCERTAIN`, leave the ID out of `deleted_ids`, and report it in `not_deleted` as `OUTCOME_UNKNOWN`. Reconciliation settles it (below).
 
 **Release.** The claim is released in one transaction, on condition `claim_id` equals this request's:
 
 1. Delete the `REMOVAL_LOG` row.
-2. Update the `FLAGGED_RECIPE` row to the decision named above, and remove `claim_id`, `claimed_by`, and `claimed_at`.
+2. Update the `FLAGGED_RECIPE` row to the decision named above, and remove `claim_id`, `claimed_by`, and `snapshot_hash`. If the decision is `RESOLVED`, also add -1 to `open_count` as in a finish. A release to `PENDING` leaves `open_count` unchanged, because the row was already counted.
 
-A release happens only when nothing was deleted, so the removal log never loses the row of a recipe that was removed. After a release, the request runs the completion check (3.5). A later request for a `PENDING` ID makes a new claim and a new log row.
+A release happens only when no delete attempt under the claim had an unknown outcome, so the removal log never loses the row of a recipe that may have been removed. After a release, the request runs the completion check (3.5). A later request for a `PENDING` ID makes a new claim and a new log row.
 
-**Reconciliation.** This settles a `DELETING` row whose request did not finish. It runs at startup (3.5) and whenever a deletion request meets a `DELETING` row whose `claim_id` is not held by a request in flight on this instance. Claims are never taken over otherwise, because a claim that looks stuck may belong to a request still in progress. C3 reads the recipe with a strongly consistent read:
+**Reconciliation.** This settles a `DELETING` row whose request did not finish, or ended in an unknown outcome. It runs at startup (3.5) and whenever a deletion request meets a `DELETING` row whose `claim_id` is not held by a request in flight on this instance. A claim that looks stuck may belong to a request still in progress, so it is never taken over. A claim is also never released because time has passed: no timeout shows that a submitted delete can no longer apply. C3 reads the recipe with a strongly consistent read and settles the claim from what it finds:
 
-- **Absent:** the claimed delete was applied. Set the row to `DELETED`, on condition `claim_id` is unchanged, and emit `RECIPE_DELETED` with the claimant as `confirmed_by`. The removal log already names them.
-- **Present, claim younger than `settle_seconds`:** leave it. The claimed delete could still be applied. The request skips the ID with `CLAIMED_ELSEWHERE`.
-- **Present, claim at least `settle_seconds` old:** the claimed delete was not applied and cannot be applied later (3.5 quiet period). Release the claim with the row back to `PENDING`.
+- **Absent:** the claimed delete was applied. Finish the row as `DELETED`, on condition `claim_id` is unchanged, and emit `RECIPE_DELETED` with the claimant as `confirmed_by`. The removal log already names them. An ID settled this way in a request is returned in `deleted_ids`.
+- **Present and equal to the snapshot** (its `steps` and `ingredients` hash to `snapshot_hash`): the claimed delete has not been seen to apply, but a late copy of it could still apply. C3 repeats the same conditional delete under the existing claim, with the current values as the condition. A late original and the repeat are the same operation on the same claimant's claim, so either order leaves the recipe deleted once, for that claimant. If the repeat succeeds or finds the recipe absent, finish the row as `DELETED` as above. If it fails with the recipe present and changed, treat the recipe as changed (next bullet). If it ends in a timeout, a server error, or any rejection, change nothing: the row stays `DELETING`, the ID is reported as `OUTCOME_UNKNOWN`, and the next request that names it, or the next startup, tries again.
+- **Present and different from the snapshot:** the recipe changed after it was scored, so the claimed delete cannot apply to it now. It could apply if the recipe were changed back to the scored values, so the removal-log row is kept. In one transaction, on condition `claim_id` is unchanged, set the removal-log row's `outcome` to `UNCONFIRMED`, and finish the flag row as `RESOLVED`. Emit `RECIPE_DELETE_SKIPPED` with `RECIPE_CHANGED`, and report the ID as `RECIPE_CHANGED`. A later audit run flags the recipe again if it is still below the threshold.
 
 One limit applies. Reconciliation treats an absent recipe as deleted by the claim holder. C3 is the only path that deletes these recipes, so the attribution holds, but a deletion by a person outside C3 during an uncertain window would be credited to the claimant.
 
-**Attribution rule.** A removal-log row is written only together with a claim, cannot be overwritten, and is removed only when its own claim is released, which happens only when nothing was deleted. Only the claim holder deletes. So the removal log, `FLAGGED_RECIPE.claimed_by`, and the `RECIPE_DELETED` event always name the same Engineer: the one whose request deleted the recipe. This holds across concurrent attempts, retries, lost responses, and crashes.
+**Attribution rule.** A removal-log row is written only together with a claim, cannot be overwritten, and is removed only when its own claim is released, which happens only when no delete attempt under the claim had an unknown outcome. Only the claim holder deletes. So the removal log, `FLAGGED_RECIPE.claimed_by`, and the `RECIPE_DELETED` event always name the same Engineer: the one whose request deleted the recipe. A row marked `UNCONFIRMED` names the Engineer whose delete may still apply late. This holds across concurrent attempts, retries, lost responses, and crashes.
 
-**Exceptions.** The exceptions endpoint changes `decision` from `PENDING` to `EXCEPTED` with the same `decision = PENDING` condition, so an exception and a deletion cannot both succeed. An ID that is not `PENDING` returns 422 `RECIPE_NOT_FLAGGED`.
+**Exceptions.** Like deletions, the exceptions endpoint is refused with 409 `RUN_NOT_AWAITING_CONFIRMATION` until the run is `AWAITING_CONFIRMATION`, so `open_count` is never decreased while a checkpoint can still add to it. For each ID it finishes the row as `EXCEPTED` (above), with the same `decision = PENDING` condition, so an exception and a deletion cannot both succeed. The `KEEP_EXCEPTION` put is part of the same transaction. An ID that is not `PENDING` returns 422 `RECIPE_NOT_FLAGGED`.
 
-**Orphaned claims.** Only a crash or an unknown delete outcome can separate a claim from its request. Both are settled by reconciliation, which also runs for every `DELETING` row of the active run at startup, after the quiet period (3.5). At that point every leftover claim is older than `settle_seconds`, so each one is finalized or released.
+**Orphaned claims.** Only a crash or an unknown delete outcome can separate a claim from its request. Both are settled by reconciliation, which also runs for every `DELETING` row of the active run at startup (3.5). A claim that reconciliation cannot settle stays `DELETING`, and the run stays open (3.5, Limit).
 
-**Completion.** A run moves to `COMPLETE` only when no flag row is `PENDING` or `DELETING`. `EXCEPTED`, `DELETED`, and `RESOLVED` rows are finished. The completion check in 3.5 decides.
+**Completion.** A run moves to `COMPLETE` only when `open_count` is 0, that is, when no flag row is `PENDING` or `DELETING`. `EXCEPTED`, `DELETED`, and `RESOLVED` rows are finished. The completion check in 3.5 decides.
 
 ---
 
@@ -621,7 +638,7 @@ One row per REQ, NFR, and CON ID.
 | NFR-08 | Deletions attributable to a confirmer and run | `REMOVAL_LOG.confirmed_by`; G4 `correlation_id`, `confirmed_by`, `recipe_id` (spec 3.1, 3.6); per-recipe claim and reconciliation (spec 3.8) | Designed | TC-021 |
 | NFR-09 | 100 times volume without gateway timeout or oversized pages | C3; D1 part 3 complexity; cursor, checkpoint, paged status (D2 part 4) | Designed | TC-022 |
 | NFR-10 | First-time Engineer completes the audit task in 10 minutes | C3 CLI; D2 2.2 command group and `--help`; five eligible pilot engineers (Requirements A-03); usability session not yet designed | Planned | TC-023 |
-| NFR-11 | Crash recovery with the same flagged set over the same data; list matches count | C3; D1 checkpoint; D2 F1, EC-13; spec 3.5 restart recovery and quiet period, 3.7 replay of an interrupted batch | Designed | TC-024 |
+| NFR-11 | Crash recovery with the same flagged set over the same data; list matches count | C3; D1 checkpoint; D2 F1, EC-13; spec 3.5 restart recovery and worker fencing, 3.7 replay of an interrupted batch | Designed | TC-024 |
 | CON-01 | Security best practices | G1; D0 part 6 minimal permissions; D2 F2; spec 3.6 | Designed | TC-025 |
 | CON-02 | Substantive code reviews | Delivery process: [Plan.md](Planning/Plan.md) R3 and section 4 (no D0 to D2 element) | Planned | TC-026 |
 | CON-03 | Isolated testing environments | Terraform non-production stack (D1 part 6; task T2); sandbox repository | Planned | TC-027 |
