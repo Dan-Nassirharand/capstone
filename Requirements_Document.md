@@ -2,7 +2,7 @@
 
 - **Project:** GE Appliances, a Haier Company: Agentic Upgrades
 - **Team members:** Dan Nassirharand, Maxwell Blevins
-- **Document version:** 1.3 (2026-10-29)
+- **Document version:** 1.4 (2026-10-29)
 - **Companion document:** [Technical_Specification.md](Technical_Specification.md), which traces to this version.
 
 **Contents**
@@ -21,7 +21,16 @@
 
 ## 1. Version and Change Log
 
-**ID rules.** IDs are stable and never reused or renumbered. A dropped requirement stays in its section with the priority "Withdrawn", and the drop is logged here. No requirement is withdrawn as of v1.3. Any change to the text, priority, or verification of a requirement is logged here and raises the version.
+**ID rules.** IDs are stable and never reused or renumbered. A dropped requirement stays in its section with the priority "Withdrawn", and the drop is logged here. No requirement is withdrawn as of v1.4. Any change to the text, priority, or verification of a requirement is logged here and raises the version.
+
+### Version 1.4 (2026-10-29)
+
+Authors: Dan Nassirharand, Maxwell Blevins
+
+- **REQ-07 (text).** `scored_count` equals the recipes read, less the keep exceptions and repeated IDs that the audit loop skips (D1 part 3). The old wording, "equals recipes read", could not hold when any recipe is skipped.
+- **NFR-11 (source).** US-03 removed from the source list. OQ-04 and W-11 say no requirement traces to US-02 or US-03, and part 3 already treats US-03 as indirect. The requirement text is unchanged.
+- **Related Technical Specification v1.4 changes** (no other requirement text changed): flag counts stay exact when a write is retried, the last checkpoint also leaves `RUNNING`, replay cleanup uses strongly consistent reads, deletes match the recipe that was scored, and an unknown delete outcome keeps its claim and log row for reconciliation. These support NFR-11, NFR-08, and REQ-13.
+- No ID or priority changed.
 
 ### Version 1.3 (2026-10-29)
 
@@ -232,7 +241,7 @@ The system shall leave a recorded outcome (`approved` or `changes_requested`) wi
 
 #### REQ-07: Start and run an audit
 
-The system shall start an audit run on the Engineer's command, return a run ID immediately, and read and score the recipe database in batches until every non-excepted recipe is scored (`scored_count` equals recipes read).
+The system shall start an audit run on the Engineer's command, return a run ID immediately, and read and score the recipe database in batches until every non-excepted recipe is scored (`scored_count` equals the recipes read, less the keep exceptions and repeated IDs that are skipped).
 
 - **Priority:** Must
 - **Source:** US-01, UC-02 steps 1 and 2
@@ -391,7 +400,7 @@ The system shall let an Engineer who has never used the client start an audit, r
 The system shall, after a C3 restart or crash during a run, set the run to HALTED and, on resume, finish with the same flagged set as an uninterrupted run over the same recipe data (100%), re-scoring at most one batch. If a recipe in the re-scored batch changes between the crash and the resume, the run reflects the recipe as it is at resume. In every case, the flagged list matches `flagged_count`.
 
 - **Priority:** Should
-- **Source:** US-01, US-03, AC-02.2
+- **Source:** US-01, AC-02.2
 - **Verification:** Test (kill the service mid-run, between a batch's flag writes and its checkpoint; repeat after repairing a flagged recipe of that batch before resuming)
 
 ---

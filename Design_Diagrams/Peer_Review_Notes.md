@@ -1,4 +1,4 @@
-git p# Peer Review Notes (D2)
+# Peer Review Notes (D2)
 
 **Team:** GE Appliances, a Haier Company
 **Team members:** Dan Nassirharand, Maxwell Blevins
