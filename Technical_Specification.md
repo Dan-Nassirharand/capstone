@@ -30,7 +30,7 @@ These changes answer the review comments on 3.5, 3.7, and 3.8. A full review of 
 
 - **Re-traced to Requirements v1.4.** REQ-07 states which recipes `scored_count` leaves out. NFR-11 drops US-03 as a source.
 - **Exact flag counts on retry (3.7).** A flag write now succeeds again for a row of the current batch, so a retry after a lost response no longer fails and under-counts. `flagged_count` grows by the number of distinct recipes the batch flagged.
-- **Final checkpoint leaves `RUNNING` (3.7).** When the cursor is exhausted, the checkpoint also sets `AWAITING_CONFIRMATION` in the same update. Before, a crash between the two writes made resume scan from the beginning and inflate `scored_count`. A completion check after that checkpoint covers a run with nothing to delete.
+- **Final checkpoint exits `RUNNING` (3.7).** When the cursor is exhausted, the checkpoint also sets `AWAITING_CONFIRMATION` in the same update. Before, a crash between the two writes made resume scan from the beginning and inflate `scored_count`. A completion check after that checkpoint covers a run with nothing to delete.
 - **Complete cleanup before replay (3.7).** The cleanup query is strongly consistent and reads every page before any replay.
 - **Store-enforced fencing replaces the quiet period (3.5, 3.7).** No timeout can prove that a stopped worker's write is gone. Every worker write is now conditioned in the store on `status = RUNNING` and the worker's `worker_epoch`, and a resume raises the epoch. A stale write is rejected, so nothing waits for time to pass. The setting `settle_seconds` and the attributes `halted_at` and `claimed_at` are removed.
 - **Constant-time completion check (3.5, 3.8).** `AUDIT_RUN.open_count` holds the number of flag rows still `PENDING` or `DELETING`. It changes in the same transaction as each row's decision, so the check is one item read instead of a scan of the run's flag rows.
@@ -194,7 +194,7 @@ I1 to I8 are from [D0 part 4](Design_Diagrams/D0_High_Level_Design.md#4-interfac
 - **Fields (allowlist):**
   - On every entry: `timestamp`, `component`, `level`, `event`, `correlation_id` (`run_id` or `pr_number`), `error_code`.
   - On deletion events, also required: `confirmed_by` (the verified IAM principal ARN of the caller, 3.6) and `recipe_id`.
-- **Deletion events:** `RECIPE_DELETED`, `RECIPE_DELETE_SKIPPED`, `RECIPE_DELETE_FAILED`, `RECIPE_DELETE_UNCERTAIN`, and `LOG_WRITE_FAILED`. Each has `correlation_id` set to the `run_id`. `RECIPE_DELETE_SKIPPED` carries `error_code` `CLAIMED_ELSEWHERE`, `NO_LONGER_ELIGIBLE`, `RECIPE_CHANGED`, or `RECIPE_ABSENT` (3.8). IDs reported as `NOT_ATTEMPTED` have no event, because nothing was done for them. `confirmed_by` is always the holder of the claim that the event reports on.
+- **Deletion events:** `RECIPE_DELETED`, `RECIPE_DELETE_SKIPPED`, `RECIPE_DELETE_FAILED`, `RECIPE_DELETE_UNCERTAIN`, and `LOG_WRITE_FAILED`. Each has `correlation_id` set to the `run_id`. `RECIPE_DELETE_SKIPPED` carries `error_code` `CLAIMED_ELSEWHERE`, `NO_LONGER_ELIGIBLE`, `RECIPE_CHANGED`, or `RECIPE_ABSENT` (3.8). IDs reported as `NOT_ATTEMPTED` have no event, because nothing was done for them. `confirmed_by` is the holder of the claim that the event reports on. `LOG_WRITE_FAILED` happens when the claim and removal-log transaction fails, so no claim exists. It uses the verified caller of the request (3.6) as `confirmed_by` and the ID whose transaction failed as `recipe_id`.
 - **Interface:** `log(event, level, correlation_id, error_code, confirmed_by, recipe_id)`. The last two are null except on deletion events.
 - **Excluded:** recipe content and credentials. A principal ARN and a recipe ID are identifiers, not content (D2 EC-36).
 - **On error:** a logging failure never fails the caller; entries go to local output. G4 is distinct from the removal log.
@@ -229,7 +229,7 @@ All endpoints use HTTPS and JSON, have the `/v1` prefix, and require SigV4. The 
 
 #### `POST /v1/audit-runs/{run_id}/deletions`: delete confirmed recipes
 
-- **Input:** `recipeIds` string[] (1 to 200). There is no confirmer field; the confirmer is the verified caller (3.6).
+- **Input:** `recipeIds` string[] (1 to 200); C3 removes duplicate IDs before applying the 200-ID limit and processes each distinct ID once, returning one result per distinct ID. There is no confirmer field; the confirmer is the verified caller (3.6).
 - **Success:** 200 with `deleted_count`, `deleted_ids`, and, when any ID was not deleted, `not_deleted` (each ID with a reason: `CLAIMED_ELSEWHERE`, `NO_LONGER_ELIGIBLE`, `RECIPE_CHANGED`, `RECIPE_ABSENT`, `DELETE_FAILED`, `OUTCOME_UNKNOWN`, or `NOT_ATTEMPTED`). IDs that were not deleted can be retried (3.8); an `OUTCOME_UNKNOWN` ID is settled by a retry or by startup recovery, which repeats the same conditional delete under the original claim, so the recipe is credited to one Engineer only. The request has a 20-second budget (3.8), below the 29-second gateway limit. IDs not started when it ends are returned as `NOT_ATTEMPTED`, so the response always arrives with a complete result.
 - **Errors:** 400 `INVALID_REQUEST`; 403 `FORBIDDEN` (no verified caller identity, 3.6); 404 `RUN_NOT_FOUND`; 409 `RUN_NOT_AWAITING_CONFIRMATION`; 422 `RECIPE_NOT_DELETABLE`; 503 `LOG_WRITE_FAILED` (only if nothing was deleted).
 
@@ -438,7 +438,7 @@ NFR-08 requires every deletion to name its confirmer and its run in both the rem
 **How C3 uses it.**
 
 - `AUDIT_RUN.started_by` and `ACTIVE_RUN_LOCK.acquired_by` are the principal of the start request.
-- For each deletion request, `confirmed_by` is the principal of that request. It is written to every `REMOVAL_LOG` row and every G4 deletion event that the request produces, together with the `run_id` and `recipe_id`. The claim protocol in 3.8 keeps this correct when two requests target the same recipe.
+- For each deletion request, `confirmed_by` is the principal of that request. It is written to every `REMOVAL_LOG` row and every G4 deletion event for a claim the request holds, together with the `run_id` and `recipe_id`. The claim protocol in 3.8 keeps this correct when two requests target the same recipe.
 - The request body has no confirmer field, so a client cannot name someone else.
 - If the identity header is missing, C3 returns 403 `FORBIDDEN` and deletes nothing.
 
@@ -465,7 +465,7 @@ The batch's count is the size of the set, so a recipe that is written twice is c
 - `open_count` to the previous value plus the size of the batch's set (every new flag row is `PENDING`)
 - `status` to `AWAITING_CONFIRMATION`, only in the final checkpoint, when `next_cursor` is empty (an empty batch is the last batch, D1 part 3)
 
-The final checkpoint leaves `RUNNING` in the same update that saves the exhausted cursor. A crash can then never leave a run `RUNNING` with a finished cursor, which a resume would scan again from the start. The worker then runs the completion check (3.5), which completes a run that has nothing flagged.
+The final checkpoint exits `RUNNING` in the same update that saves the exhausted cursor. A crash can then never leave a run `RUNNING` with a finished cursor, which a resume would scan again from the start. The worker then runs the completion check (3.5), which completes a run that has nothing flagged.
 
 **Resume.** On every resume, whatever the halt reason, the worker does these steps before it reads any recipe:
 
@@ -509,7 +509,7 @@ The outcome decides what happens next:
 
 - **Transaction succeeds:** this request holds the claim and goes on to delete.
 - **Cancelled on a condition:** another request holds the claim, or the row is already `DELETED`, `EXCEPTED`, or `RESOLVED`. If the row is `DELETING` and no request on this instance holds its claim, C3 reconciles it first (below). Otherwise the ID is skipped with `CLAIMED_ELSEWHERE`.
-- **Store failure:** the D2 F2 log-write-failure path applies. The loop stops, and the request returns 503 `LOG_WRITE_FAILED` if nothing was deleted.
+- **Store failure:** the loop stops, the ID is not claimed, and `LOG_WRITE_FAILED` is emitted with the request's verified caller as `confirmed_by` (3.1). The request returns 503 `LOG_WRITE_FAILED` if nothing was deleted, and otherwise 200 with the IDs not yet started as `NOT_ATTEMPTED`.
 
 **Delete.** The claim holder deletes the recipe from the Recipe Database (I7) with a conditional delete. The condition requires `attribute_exists(recipeId)` and, for each of `steps` and `ingredients`, an exact match to the scored snapshot: the original DynamoDB value if the field was present, or `attribute_not_exists(field)` if it was missing. A recipe repaired after it was scored is therefore not deleted, and an unchanged `UNPARSEABLE` recipe (3.1, a missing field) can be. A delete that returns the failed item (`ReturnValuesOnConditionCheckFailure = ALL_OLD`) lets C3 see what changed. The delete is safe to repeat, because the same condition applies each time. Transient errors are retried with backoff within the request budget. The outcome falls into one of these cases. An earlier attempt of this request is *uncertain* if it ended in a timeout, a server error, a lost connection, or the deadline.
 
