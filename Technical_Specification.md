@@ -39,6 +39,7 @@ These changes answer the review comments on 3.5, 3.7, and 3.8. A full review of 
 - **Unknown delete outcome (3.8).** A timeout or lost response keeps the claim and removal-log row, and a reconciliation step settles them. Only a definitive rejection of a claim with no earlier uncertain attempt releases it, so a recipe that was actually deleted never loses its attribution.
 - **Delete condition handles missing fields (3.8).** A missing `steps` or `ingredients` is compared with `attribute_not_exists`, so an unchanged `UNPARSEABLE` recipe can be deleted.
 - **Request budget (3.2, 3.8).** A deletions request stops starting IDs at a 20-second deadline, below the 29-second gateway limit, and reports the rest as `NOT_ATTEMPTED`.
+- **Claim transaction review fixes (3.1 to 3.3, 3.8).** Claim retries use a stable idempotency token; indeterminate outcomes preserve any claim and are reported separately from definitive failures. Both the failed ID and unstarted IDs are returned. Deletions have a separate request schema so the 200-ID limit applies after de-duplication, while exceptions retain their raw-array limit.
 - **Added:** optional `not_deleted` in the deletions response, reason `NOT_ATTEMPTED`, event `RECIPE_DELETE_UNCERTAIN`, and the attributes `worker_epoch`, `open_count`, `snapshot_hash`, and `outcome`.
 - **Supersedes** the v1.3 "Flag writes" and "Resume" rules in 3.7, the delete, release, and orphaned-claim rules in 3.8, the D2 F2 deletion step list (log write, delete, mark `DELETED`), and the D1 part 3 audit loop, which set `AWAITING_CONFIRMATION` in a separate step after the cursor was exhausted.
 
@@ -181,7 +182,7 @@ I1 to I8 are from [D0 part 4](Design_Diagrams/D0_High_Level_Design.md#4-interfac
   - Finish a flag row and adjust `open_count` (one transaction), or release or reconcile a claim (3.8)
   - Complete a run and release the lock (one transaction, 3.5)
 - **Outputs:** the stored items in 3.4.
-- **On error:** `STORE_ERROR`: a running audit is HALTED and deletion is refused. If the claim and removal-log transaction fails, the recipe is not deleted. A held lock returns 409 `RUN_IN_PROGRESS`.
+- **On error:** `STORE_ERROR`: a running audit is HALTED and deletion is refused. A definitively rejected claim and removal-log transaction makes no change. An indeterminate outcome is retried idempotently; if unresolved, C3 sends no delete in that request, preserves any claim and log row, and reports `OUTCOME_UNKNOWN` (3.8). A held lock returns 409 `RUN_IN_PROGRESS`.
 
 #### G1: CLI → API Gateway → C3
 
@@ -194,7 +195,7 @@ I1 to I8 are from [D0 part 4](Design_Diagrams/D0_High_Level_Design.md#4-interfac
 - **Fields (allowlist):**
   - On every entry: `timestamp`, `component`, `level`, `event`, `correlation_id` (`run_id` or `pr_number`), `error_code`.
   - On deletion events, also required: `confirmed_by` (the verified IAM principal ARN of the caller, 3.6) and `recipe_id`.
-- **Deletion events:** `RECIPE_DELETED`, `RECIPE_DELETE_SKIPPED`, `RECIPE_DELETE_FAILED`, `RECIPE_DELETE_UNCERTAIN`, and `LOG_WRITE_FAILED`. Each has `correlation_id` set to the `run_id`. `RECIPE_DELETE_SKIPPED` carries `error_code` `CLAIMED_ELSEWHERE`, `NO_LONGER_ELIGIBLE`, `RECIPE_CHANGED`, or `RECIPE_ABSENT` (3.8). IDs reported as `NOT_ATTEMPTED` have no event, because nothing was done for them. `confirmed_by` is the holder of the claim that the event reports on. `LOG_WRITE_FAILED` happens when the claim and removal-log transaction fails, so no claim exists. It uses the verified caller of the request (3.6) as `confirmed_by` and the ID whose transaction failed as `recipe_id`.
+- **Deletion events:** `RECIPE_DELETED`, `RECIPE_DELETE_SKIPPED`, `RECIPE_DELETE_FAILED`, `RECIPE_DELETE_UNCERTAIN`, `RECIPE_CLAIM_UNCERTAIN`, and `LOG_WRITE_FAILED`. Each has `correlation_id` set to the `run_id`. `RECIPE_DELETE_SKIPPED` carries `error_code` `CLAIMED_ELSEWHERE`, `NO_LONGER_ELIGIBLE`, `RECIPE_CHANGED`, or `RECIPE_ABSENT` (3.8). IDs not started and reported as `NOT_ATTEMPTED` have no event. `confirmed_by` is the holder of the claim that the event reports on. `LOG_WRITE_FAILED` is emitted only when the claim and removal-log transaction is definitively rejected with no earlier unresolved attempt; this request acquired no claim. `RECIPE_CLAIM_UNCERTAIN` carries `OUTCOME_UNKNOWN` when the claim transaction's outcome remains indeterminate. Both use the verified caller of the request (3.6) as `confirmed_by` and the affected ID as `recipe_id`.
 - **Interface:** `log(event, level, correlation_id, error_code, confirmed_by, recipe_id)`. The last two are null except on deletion events.
 - **Excluded:** recipe content and credentials. A principal ARN and a recipe ID are identifiers, not content (D2 EC-36).
 - **On error:** a logging failure never fails the caller; entries go to local output. G4 is distinct from the removal log.
@@ -229,9 +230,9 @@ All endpoints use HTTPS and JSON, have the `/v1` prefix, and require SigV4. The 
 
 #### `POST /v1/audit-runs/{run_id}/deletions`: delete confirmed recipes
 
-- **Input:** `recipeIds` string[] (1 to 200); C3 removes duplicate IDs before applying the 200-ID limit and processes each distinct ID once, returning one result per distinct ID. There is no confirmer field; the confirmer is the verified caller (3.6).
-- **Success:** 200 with `deleted_count`, `deleted_ids`, and, when any ID was not deleted, `not_deleted` (each ID with a reason: `CLAIMED_ELSEWHERE`, `NO_LONGER_ELIGIBLE`, `RECIPE_CHANGED`, `RECIPE_ABSENT`, `DELETE_FAILED`, `OUTCOME_UNKNOWN`, or `NOT_ATTEMPTED`). IDs that were not deleted can be retried (3.8); an `OUTCOME_UNKNOWN` ID is settled by a retry or by startup recovery, which repeats the same conditional delete under the original claim, so the recipe is credited to one Engineer only. The request has a 20-second budget (3.8), below the 29-second gateway limit. IDs not started when it ends are returned as `NOT_ATTEMPTED`, so the response always arrives with a complete result.
-- **Errors:** 400 `INVALID_REQUEST`; 403 `FORBIDDEN` (no verified caller identity, 3.6); 404 `RUN_NOT_FOUND`; 409 `RUN_NOT_AWAITING_CONFIRMATION`; 422 `RECIPE_NOT_DELETABLE`; 503 `LOG_WRITE_FAILED` (only if nothing was deleted).
+- **Input:** a nonempty `recipeIds` string[]; C3 removes duplicate IDs before applying the 200-distinct-ID limit and processes each distinct ID once, returning one result per distinct ID. The raw array has no item-count maximum in the schema. There is no confirmer field; the confirmer is the verified caller (3.6).
+- **Success:** 200 with `deleted_count`, `deleted_ids`, and, when any ID was not deleted, `not_deleted` (each ID with a reason: `CLAIMED_ELSEWHERE`, `NO_LONGER_ELIGIBLE`, `RECIPE_CHANGED`, `RECIPE_ABSENT`, `LOG_WRITE_FAILED`, `DELETE_FAILED`, `OUTCOME_UNKNOWN`, or `NOT_ATTEMPTED`). IDs that were not deleted can be retried (3.8); an `OUTCOME_UNKNOWN` ID may have an unresolved claim transaction or delete. A retry or startup recovery reconciles any committed claim under its original attribution (3.8). The request has a 20-second budget (3.8), below the 29-second gateway limit. IDs not started when it ends are returned as `NOT_ATTEMPTED`, so the response always arrives with a complete result.
+- **Errors:** 400 `INVALID_REQUEST`; 403 `FORBIDDEN` (no verified caller identity, 3.6); 404 `RUN_NOT_FOUND`; 409 `RUN_NOT_AWAITING_CONFIRMATION`; 422 `RECIPE_NOT_DELETABLE`; 503 `LOG_WRITE_FAILED` or `OUTCOME_UNKNOWN` for a failed or unresolved claim transaction, respectively (only if nothing was deleted). These 503 bodies also include `not_deleted`, with one result for every distinct ID, including the affected ID and all unstarted IDs.
 
 **CLI mapping.** The CLI maps these to `audit start`, `audit status`, `audit resume`, `audit except`, and `audit delete` ([D2 part 2.2](Design_Diagrams/D2_Detailed_Design.md)). `audit delete` asks the Engineer to type `yes` before any request is sent, then prints the count deleted and each ID that was not deleted with its reason (`not_deleted`, 3.2).
 
@@ -274,9 +275,9 @@ All endpoints use HTTPS and JSON, have the `/v1` prefix, and require SigV4. The 
         }
       }
     },
-    "idsRequest": {
+    "exceptionsRequest": {
       "type": "object",
-      "required": ["recipeIds"],
+      "required": ["recipeIds", "reason"],
       "properties": {
         "recipeIds": {
           "type": "array",
@@ -285,6 +286,18 @@ All endpoints use HTTPS and JSON, have the `/v1` prefix, and require SigV4. The 
           "maxItems": 200
         },
         "reason": { "type": "string", "minLength": 1, "maxLength": 500 }
+      }
+    },
+    "deletionsRequest": {
+      "type": "object",
+      "required": ["recipeIds"],
+      "properties": {
+        "recipeIds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1,
+          "description": "C3 removes duplicates, then rejects more than 200 distinct IDs."
+        }
       }
     },
     "statusResponse": {
@@ -325,6 +338,7 @@ All endpoints use HTTPS and JSON, have the `/v1` prefix, and require SigV4. The 
                   "NO_LONGER_ELIGIBLE",
                   "RECIPE_CHANGED",
                   "RECIPE_ABSENT",
+                  "LOG_WRITE_FAILED",
                   "DELETE_FAILED",
                   "OUTCOME_UNKNOWN",
                   "NOT_ATTEMPTED"
@@ -340,14 +354,15 @@ All endpoints use HTTPS and JSON, have the `/v1` prefix, and require SigV4. The 
       "required": ["error_code", "message"],
       "properties": {
         "error_code": { "type": "string" },
-        "message": { "type": "string" }
+        "message": { "type": "string" },
+        "not_deleted": { "$ref": "#/$defs/deletionsResponse/properties/not_deleted" }
       }
     }
   }
 }
 ```
 
-`idsRequest` is used by `/exceptions` (with `reason` required) and `/deletions` (without). The `error` body (code and message) is the shape the CLI prints (D2 part 2.2); it applies to every 4xx and 5xx response. Example payloads for I4 and I7 are in [D0 part 4](Design_Diagrams/D0_High_Level_Design.md#4-interface-specification-table); a deletions example is in [D1 part 5](Design_Diagrams/D1_Detailed_Design.md#5-api-contract).
+`exceptionsRequest` is used by `/exceptions`; `deletionsRequest` is used by `/deletions`. Only exceptions enforce the 200-item limit on the raw array; deletions enforce it after de-duplication in C3. The `error` body (code and message) is the shape the CLI prints (D2 part 2.2); it applies to every 4xx and 5xx response. For the deletion claim failures in 3.2, the CLI also prints every ID and reason in the error body's `not_deleted`. Example payloads for I4 and I7 are in [D0 part 4](Design_Diagrams/D0_High_Level_Design.md#4-interface-specification-table); a deletions example is in [D1 part 5](Design_Diagrams/D1_Detailed_Design.md#5-api-contract).
 
 ### 3.4 Database schema (Amazon DynamoDB)
 
@@ -505,11 +520,16 @@ Recipes in committed batches are not re-read. If one of them changes after it wa
 1. Update the `FLAGGED_RECIPE` row: set `decision = DELETING`, `claim_id` to a value unique to this request (the API Gateway request ID), `claimed_by` to the confirmer (3.6), and `snapshot_hash` to the hash of the `steps` and `ingredients` read in the check. Condition: `decision = PENDING`.
 2. Put the `REMOVAL_LOG` row with the score and defects from the check, `confirmed_by`, and `claim_id`. Condition: `attribute_not_exists(recipeId)`.
 
+Before sending, C3 generates a UUID `ClientRequestToken` for this ID's claim transaction. Every retry uses that same token and identical transaction parameters, including the original timestamp, score, defects, and snapshot hash. Tokens are never shared across IDs or reused for a different transaction. Retries stay within both the request budget and DynamoDB's 10-minute idempotency window; C3 never resubmits an unresolved transaction with a fresh token. A timeout, server error, or lost response is not proof of rejection, and a read that finds no claim does not rule out a late commit.
+
 The outcome decides what happens next:
 
 - **Transaction succeeds:** this request holds the claim and goes on to delete.
-- **Cancelled on a condition:** another request holds the claim, or the row is already `DELETED`, `EXCEPTED`, or `RESOLVED`. If the row is `DELETING` and no request on this instance holds its claim, C3 reconciles it first (below). Otherwise the ID is skipped with `CLAIMED_ELSEWHERE`.
-- **Store failure:** the loop stops, the ID is not claimed, and `LOG_WRITE_FAILED` is emitted with the request's verified caller as `confirmed_by` (3.1). The request returns 503 `LOG_WRITE_FAILED` if nothing was deleted, and otherwise 200 with the IDs not yet started as `NOT_ATTEMPTED`.
+- **Cancelled on a condition, with no earlier unresolved attempt:** another request holds the claim, or the row is already `DELETED`, `EXCEPTED`, or `RESOLVED`. If the row is `DELETING` and no request on this instance holds its claim, C3 reconciles it first (below). Otherwise the ID is skipped with `CLAIMED_ELSEWHERE`.
+- **Other definitive rejection, with no earlier unresolved attempt:** the loop stops; this request acquired no claim. Emit `LOG_WRITE_FAILED` with the request's verified caller as `confirmed_by` (3.1), and include this ID in `not_deleted` as `LOG_WRITE_FAILED`.
+- **Indeterminate outcome:** retry the identical transaction with the stable token to establish success or rejection. A later rejection alone does not settle an earlier unresolved attempt. If the budget ends without a definitive result, stop the loop, send no recipe delete, and do not release or remove any claim or removal-log row that may have committed or may still commit. Emit `RECIPE_CLAIM_UNCERTAIN` with the verified caller and report this ID as `OUTCOME_UNKNOWN`. A committed `DELETING` row retains the original claim and attribution for reconciliation; an absent row is not evidence that the transaction cannot still commit. Later requests still require a successful conditional claim before deleting.
+
+For either failure that stops the loop, include all IDs not yet started as `NOT_ATTEMPTED` as well as the affected ID's result and all earlier results. If nothing was deleted, return 503 with the corresponding `LOG_WRITE_FAILED` or `OUTCOME_UNKNOWN` error and the complete `not_deleted` list; otherwise return 200. For example, if `a` was deleted and the claim for `b` fails in `[a, b, c]`, return `a` in `deleted_ids`, `b` in `not_deleted` as `LOG_WRITE_FAILED` or `OUTCOME_UNKNOWN`, and `c` as `NOT_ATTEMPTED`.
 
 **Delete.** The claim holder deletes the recipe from the Recipe Database (I7) with a conditional delete. The condition requires `attribute_exists(recipeId)` and, for each of `steps` and `ingredients`, an exact match to the scored snapshot: the original DynamoDB value if the field was present, or `attribute_not_exists(field)` if it was missing. A recipe repaired after it was scored is therefore not deleted, and an unchanged `UNPARSEABLE` recipe (3.1, a missing field) can be. A delete that returns the failed item (`ReturnValuesOnConditionCheckFailure = ALL_OLD`) lets C3 see what changed. The delete is safe to repeat, because the same condition applies each time. Transient errors are retried with backoff within the request budget. The outcome falls into one of these cases. An earlier attempt of this request is *uncertain* if it ended in a timeout, a server error, a lost connection, or the deadline.
 
@@ -538,7 +558,7 @@ One limit applies. Reconciliation treats an absent recipe as deleted by the clai
 
 **Exceptions.** Like deletions, the exceptions endpoint is refused with 409 `RUN_NOT_AWAITING_CONFIRMATION` until the run is `AWAITING_CONFIRMATION`, so `open_count` is never decreased while a checkpoint can still add to it. For each ID it finishes the row as `EXCEPTED` (above), with the same `decision = PENDING` condition, so an exception and a deletion cannot both succeed. The `KEEP_EXCEPTION` put is part of the same transaction. An ID that is not `PENDING` returns 422 `RECIPE_NOT_FLAGGED`.
 
-**Orphaned claims.** Only a crash or an unknown delete outcome can separate a claim from its request. Both are settled by reconciliation, which also runs for every `DELETING` row of the active run at startup (3.5). A claim that reconciliation cannot settle stays `DELETING`, and the run stays open (3.5, Limit).
+**Orphaned claims.** A crash, an unknown claim-transaction outcome, or an unknown delete outcome can separate a claim from its request. Any committed claim is settled by reconciliation, which also runs for every `DELETING` row of the active run at startup (3.5). A claim transaction may commit after a recovery read; a later deletion request that encounters its row reconciles it under the original claimant, rather than replacing it. A claim that reconciliation cannot settle stays `DELETING`, and the run stays open (3.5, Limit).
 
 **Completion.** A run moves to `COMPLETE` only when `open_count` is 0, that is, when no flag row is `PENDING` or `DELETING`. `EXCEPTED`, `DELETED`, and `RESOLVED` rows are finished. The completion check in 3.5 decides.
 
