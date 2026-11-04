@@ -2,7 +2,7 @@
 
 - **Project:** GE Appliances, a Haier Company: Agentic Upgrades
 - **Team members:** Dan Nassirharand, Maxwell Blevins
-- **Document version:** 1.5 (2026-11-03)
+- **Document version:** 1.5 (2026-11-04)
 - **Traces to:** [Requirements_Document.md](Requirements_Document.md) **version 1.4 (2026-10-29)**. Terms (Engineer, audit run, flagged recipe, triggering event, and so on) are used as defined in its glossary.
 - **Design sources:** [D0](Design_Diagrams/D0_High_Level_Design.md), [D1](Design_Diagrams/D1_Detailed_Design.md), [D2](Design_Diagrams/D2_Detailed_Design.md) (2026-10-14). Where this specification and those documents differ, this specification governs. Every difference is listed in part 1.
 
@@ -22,7 +22,7 @@
 
 Each version names the Requirements Document version it traces to. Any later change to D0 to D2 or to the Requirements Document is logged here with the new requirements version.
 
-### Version 1.5 (2026-11-03), traces to Requirements v1.4
+### Version 1.5 (2026-11-04), traces to Requirements v1.4
 
 Authors: Dan Nassirharand, Maxwell Blevins
 
@@ -36,14 +36,16 @@ Authors: Dan Nassirharand, Maxwell Blevins
   - REQ-13: TC-042, TC-043
   - NFR-01: TC-044, TC-045
   - NFR-04: TC-046, TC-047
+  - NFR-08: TC-048 (controlled claim contention)
 
   No ID was renumbered.
 
+- **G4 records the articles C2 selects (REQ-01).** C2 writes one `ARTICLES_SELECTED` entry per review pass, with the new allowlisted field `article_ids` (3.1). Before this, no log or interface exposed which articles were retrieved, so REQ-01's retrieval rate could not be measured.
 - **Test-only controls, with no production behavior change** ([Test_Plan.md](Test_Plan.md) part 5):
-  - A development-only `fault-injection` profile in C3, with the hooks `pause-before-checkpoint` and `drop-delete-response`. The pilot image refuses to start with it.
+  - A development-only `fault-injection` profile in C3, with the hooks `pause-before-checkpoint`, `pause-before-claim`, and `drop-delete-response`. The pilot image refuses to start with it.
   - A staging-only Terraform variable, `deny_removal_log_write`.
   - An account check in the test runner (NFR-05).
-- No interface, schema, or requirement changed.
+- No endpoint, schema, or requirement changed.
 
 ### Version 1.4 (2026-10-29), traces to Requirements v1.4
 
@@ -218,9 +220,10 @@ I1 to I8 are from [D0 part 4](Design_Diagrams/D0_High_Level_Design.md#4-interfac
 - **Fields (allowlist):**
   - On every entry: `timestamp`, `component`, `level`, `event`, `correlation_id` (`run_id` or `pr_number`), `error_code`.
   - On deletion events, also required: `confirmed_by` (the verified IAM principal ARN of the caller, 3.6) and `recipe_id`.
+  - On C2's `ARTICLES_SELECTED` event, written once per review pass with `correlation_id` set to the `pr_number`, also required: `article_ids`, the IDs that I2 returned (an empty list is valid).
 - **Deletion events:** `RECIPE_DELETED`, `RECIPE_DELETE_SKIPPED`, `RECIPE_DELETE_FAILED`, `RECIPE_DELETE_UNCERTAIN`, `RECIPE_CLAIM_UNCERTAIN`, and `LOG_WRITE_FAILED`. Each has `correlation_id` set to the `run_id`. `RECIPE_DELETE_SKIPPED` carries `error_code` `CLAIMED_ELSEWHERE`, `NO_LONGER_ELIGIBLE`, `RECIPE_CHANGED`, or `RECIPE_ABSENT` (3.8). IDs not started and reported as `NOT_ATTEMPTED` have no event. `confirmed_by` is the holder of the claim that the event reports on. `LOG_WRITE_FAILED` is emitted only when the claim and removal-log transaction is definitively rejected with no earlier unresolved attempt; this request acquired no claim. `RECIPE_CLAIM_UNCERTAIN` carries `OUTCOME_UNKNOWN` when the claim transaction's outcome remains indeterminate. Both use the verified caller of the request (3.6) as `confirmed_by` and the affected ID as `recipe_id`.
-- **Interface:** `log(event, level, correlation_id, error_code, confirmed_by, recipe_id)`. The last two are null except on deletion events.
-- **Excluded:** recipe content and credentials. A principal ARN and a recipe ID are identifiers, not content (D2 EC-36).
+- **Interface:** `log(event, level, correlation_id, error_code, confirmed_by, recipe_id, article_ids)`. `confirmed_by` and `recipe_id` are null except on deletion events; `article_ids` is null except on `ARTICLES_SELECTED`.
+- **Excluded:** recipe content, article text, and credentials. A principal ARN, a recipe ID, and an article ID are identifiers, not content (D2 EC-36).
 - **On error:** a logging failure never fails the caller; entries go to local output. G4 is distinct from the removal log.
 
 ### 3.2 C3 endpoints
@@ -660,7 +663,7 @@ One row per REQ, NFR, and CON ID.
 
 | Req ID | Description                                                                             | Design component                                                                                                                             | Status   | Test case              |
 | ------ | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ---------------------- |
-| REQ-01 | Retrieve relevant knowledge base articles for the changed files                         | C2; D0 I2, I3; D1 `select_articles`; D2 2.5                                                                                                  | Designed | TC-001, TC-030, TC-031 |
+| REQ-01 | Retrieve relevant knowledge base articles for the changed files                         | C2; D0 I2, I3; D1 `select_articles`; D2 2.5; G4 `ARTICLES_SELECTED` (spec 3.1)                                                               | Designed | TC-001, TC-030, TC-031 |
 | REQ-02 | Cited inline comments; uncited findings marked Low or Medium                            | C1; D0 I4, I5; D1 review pass; D2 F4                                                                                                         | Designed | TC-002, TC-032, TC-033 |
 | REQ-03 | Re-review each push on the latest `head_sha`; approve when clean                        | C1; D0 I1 (`synchronize`), decision 5; D2 F4, EC-02                                                                                          | Designed | TC-003                 |
 | REQ-04 | Dismiss informational comment with a one-line justification                             | C1; D0 I5; D1 UC-01 A2 (GitHub native resolve)                                                                                               | Designed | TC-004                 |
@@ -680,7 +683,7 @@ One row per REQ, NFR, and CON ID.
 | NFR-05 | All testing in the sandbox                                                              | Terraform stacks (D1 part 6); D2 part 4 gap (stack not yet specified)                                                                        | Planned  | TC-018                 |
 | NFR-06 | No model call per recipe; article cap                                                   | D0 decision 2, decision 3; D2 G3 article cap, EC-06                                                                                          | Designed | TC-019                 |
 | NFR-07 | Repeatable scores; ruleset version stored                                               | C4; D1 `ruleset_version`; D2 F3 `RULESET`, EC-21                                                                                             | Designed | TC-020                 |
-| NFR-08 | Deletions attributable to a confirmer and run                                           | `REMOVAL_LOG.confirmed_by`; G4 `correlation_id`, `confirmed_by`, `recipe_id` (spec 3.1, 3.6); per-recipe claim and reconciliation (spec 3.8) | Designed | TC-021                 |
+| NFR-08 | Deletions attributable to a confirmer and run                                           | `REMOVAL_LOG.confirmed_by`; G4 `correlation_id`, `confirmed_by`, `recipe_id` (spec 3.1, 3.6); per-recipe claim and reconciliation (spec 3.8) | Designed | TC-021, TC-048         |
 | NFR-09 | 100 times volume without gateway timeout or oversized pages                             | C3; D1 part 3 complexity; cursor, checkpoint, paged status (D2 part 4)                                                                       | Designed | TC-022                 |
 | NFR-10 | First-time Engineer completes the audit task in 10 minutes                              | C3 CLI; D2 2.2 command group and `--help`; five eligible pilot engineers (Requirements A-03); usability session not yet designed             | Planned  | TC-023                 |
 | NFR-11 | Crash recovery with the same flagged set over the same data; list matches count         | C3; D1 checkpoint; D2 F1, EC-13; spec 3.5 restart recovery and worker fencing, 3.7 replay of an interrupted batch                            | Designed | TC-024                 |
