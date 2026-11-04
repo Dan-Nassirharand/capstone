@@ -2,7 +2,7 @@
 
 - **Project:** GE Appliances, a Haier Company: Agentic Upgrades
 - **Team members:** Dan Nassirharand, Maxwell Blevins
-- **Document version:** 1.4 (2026-10-29)
+- **Document version:** 1.5 (2026-11-04)
 - **Traces to:** [Requirements_Document.md](Requirements_Document.md) **version 1.4 (2026-10-29)**. Terms (Engineer, audit run, flagged recipe, triggering event, and so on) are used as defined in its glossary.
 - **Design sources:** [D0](Design_Diagrams/D0_High_Level_Design.md), [D1](Design_Diagrams/D1_Detailed_Design.md), [D2](Design_Diagrams/D2_Detailed_Design.md) (2026-10-14). Where this specification and those documents differ, this specification governs. Every difference is listed in part 1.
 
@@ -21,6 +21,31 @@
 ## 1. Version and Change Log
 
 Each version names the Requirements Document version it traces to. Any later change to D0 to D2 or to the Requirements Document is logged here with the new requirements version.
+
+### Version 1.5 (2026-11-04), traces to Requirements v1.4
+
+Authors: Dan Nassirharand, Maxwell Blevins
+
+- **Test case IDs added for [Test_Plan.md](Test_Plan.md).** Each Must row in part 6 now has three test cases. TC-001 to TC-029 keep their rows. The new IDs are:
+  - REQ-01: TC-030, TC-031
+  - REQ-02: TC-032, TC-033
+  - REQ-07: TC-034, TC-035
+  - REQ-08: TC-036, TC-037
+  - REQ-09: TC-038, TC-039
+  - REQ-10: TC-040, TC-041
+  - REQ-13: TC-042, TC-043
+  - NFR-01: TC-044, TC-045
+  - NFR-04: TC-046, TC-047
+  - NFR-08: TC-048 (controlled claim contention)
+
+  No ID was renumbered.
+
+- **G4 records the articles C2 selects (REQ-01).** C2 writes one `ARTICLES_SELECTED` entry per review pass, with the new allowlisted field `article_ids` (3.1). Before this, no log or interface exposed which articles were retrieved, so REQ-01's retrieval rate could not be measured.
+- **Test-only controls, with no production behavior change** ([Test_Plan.md](Test_Plan.md) part 5):
+  - A development-only `fault-injection` profile in C3, with the hooks `pause-before-checkpoint`, `pause-before-claim`, and `drop-delete-response`. The pilot image refuses to start with it.
+  - A staging-only Terraform variable, `deny_removal_log_write`.
+  - An account check in the test runner (NFR-05).
+- No endpoint, schema, or requirement changed.
 
 ### Version 1.4 (2026-10-29), traces to Requirements v1.4
 
@@ -105,19 +130,19 @@ The system is two AI agent pipelines, drawn in the [D0 block diagram](Design_Dia
 
 I1 to I8 are from [D0 part 4](Design_Diagrams/D0_High_Level_Design.md#4-interface-specification-table), revised by [D1](Design_Diagrams/D1_Detailed_Design.md) and [D2 part 2.7](Design_Diagrams/D2_Detailed_Design.md). I9, G1, and G4 are from D1 and D2; I9 and G4 are revised by this specification (part 1, v1.2 to v1.4).
 
-| ID  | Boundary                  | Format and protocol                                      |
-| --- | ------------------------- | -------------------------------------------------------- |
-| I1  | GitHub → C1               | JSON; GitHub pull request configuration (no endpoint)    |
-| I2  | C1 → C2                   | JSON; tool call inside the Copilot reviewer              |
-| I3  | C2 → knowledge base       | Markdown; GitHub REST API over HTTPS                     |
-| I4  | C1 → model (Copilot)      | JSON; HTTPS inside GitHub                                |
-| I5  | C1 → GitHub               | JSON; GitHub REST API over HTTPS                         |
-| I6  | CLI → C3                  | JSON over HTTPS REST, SigV4 signed (G1)                  |
-| I7  | C3 → Recipe Database      | JSON items; AWS SDK for Java v2 (DynamoDB)               |
-| I8  | C3 → C4                   | Java function call, in process                           |
-| I9  | C3 → audit store          | DynamoDB items; AWS SDK for Java v2                      |
-| G1  | CLI → API Gateway → C3    | SigV4 over HTTPS; IAM authorization                      |
-| G4  | Components → log service  | Structured log entry with allowlisted fields             |
+| ID  | Boundary                 | Format and protocol                                   |
+| --- | ------------------------ | ----------------------------------------------------- |
+| I1  | GitHub → C1              | JSON; GitHub pull request configuration (no endpoint) |
+| I2  | C1 → C2                  | JSON; tool call inside the Copilot reviewer           |
+| I3  | C2 → knowledge base      | Markdown; GitHub REST API over HTTPS                  |
+| I4  | C1 → model (Copilot)     | JSON; HTTPS inside GitHub                             |
+| I5  | C1 → GitHub              | JSON; GitHub REST API over HTTPS                      |
+| I6  | CLI → C3                 | JSON over HTTPS REST, SigV4 signed (G1)               |
+| I7  | C3 → Recipe Database     | JSON items; AWS SDK for Java v2 (DynamoDB)            |
+| I8  | C3 → C4                  | Java function call, in process                        |
+| I9  | C3 → audit store         | DynamoDB items; AWS SDK for Java v2                   |
+| G1  | CLI → API Gateway → C3   | SigV4 over HTTPS; IAM authorization                   |
+| G4  | Components → log service | Structured log entry with allowlisted fields          |
 
 #### I1: GitHub → C1
 
@@ -195,9 +220,10 @@ I1 to I8 are from [D0 part 4](Design_Diagrams/D0_High_Level_Design.md#4-interfac
 - **Fields (allowlist):**
   - On every entry: `timestamp`, `component`, `level`, `event`, `correlation_id` (`run_id` or `pr_number`), `error_code`.
   - On deletion events, also required: `confirmed_by` (the verified IAM principal ARN of the caller, 3.6) and `recipe_id`.
+  - On C2's `ARTICLES_SELECTED` event, written once per review pass with `correlation_id` set to the `pr_number`, also required: `article_ids`, the IDs that I2 returned (an empty list is valid).
 - **Deletion events:** `RECIPE_DELETED`, `RECIPE_DELETE_SKIPPED`, `RECIPE_DELETE_FAILED`, `RECIPE_DELETE_UNCERTAIN`, `RECIPE_CLAIM_UNCERTAIN`, and `LOG_WRITE_FAILED`. Each has `correlation_id` set to the `run_id`. `RECIPE_DELETE_SKIPPED` carries `error_code` `CLAIMED_ELSEWHERE`, `NO_LONGER_ELIGIBLE`, `RECIPE_CHANGED`, or `RECIPE_ABSENT` (3.8). IDs not started and reported as `NOT_ATTEMPTED` have no event. `confirmed_by` is the holder of the claim that the event reports on. `LOG_WRITE_FAILED` is emitted only when the claim and removal-log transaction is definitively rejected with no earlier unresolved attempt; this request acquired no claim. `RECIPE_CLAIM_UNCERTAIN` carries `OUTCOME_UNKNOWN` when the claim transaction's outcome remains indeterminate. Both use the verified caller of the request (3.6) as `confirmed_by` and the affected ID as `recipe_id`.
-- **Interface:** `log(event, level, correlation_id, error_code, confirmed_by, recipe_id)`. The last two are null except on deletion events.
-- **Excluded:** recipe content and credentials. A principal ARN and a recipe ID are identifiers, not content (D2 EC-36).
+- **Interface:** `log(event, level, correlation_id, error_code, confirmed_by, recipe_id, article_ids)`. `confirmed_by` and `recipe_id` are null except on deletion events; `article_ids` is null except on `ARTICLES_SELECTED`.
+- **Excluded:** recipe content, article text, and credentials. A principal ARN, a recipe ID, and an article ID are identifiers, not content (D2 EC-36).
 - **On error:** a logging failure never fails the caller; entries go to local output. G4 is distinct from the removal log.
 
 ### 3.2 C3 endpoints
@@ -355,7 +381,9 @@ All endpoints use HTTPS and JSON, have the `/v1` prefix, and require SigV4. The 
       "properties": {
         "error_code": { "type": "string" },
         "message": { "type": "string" },
-        "not_deleted": { "$ref": "#/$defs/deletionsResponse/properties/not_deleted" }
+        "not_deleted": {
+          "$ref": "#/$defs/deletionsResponse/properties/not_deleted"
+        }
       }
     }
   }
@@ -531,7 +559,7 @@ The outcome decides what happens next:
 
 For either failure that stops the loop, include all IDs not yet started as `NOT_ATTEMPTED` as well as the affected ID's result and all earlier results. If nothing was deleted, return 503 with the corresponding `LOG_WRITE_FAILED` or `OUTCOME_UNKNOWN` error and the complete `not_deleted` list; otherwise return 200. For example, if `a` was deleted and the claim for `b` fails in `[a, b, c]`, return `a` in `deleted_ids`, `b` in `not_deleted` as `LOG_WRITE_FAILED` or `OUTCOME_UNKNOWN`, and `c` as `NOT_ATTEMPTED`.
 
-**Delete.** The claim holder deletes the recipe from the Recipe Database (I7) with a conditional delete. The condition requires `attribute_exists(recipeId)` and, for each of `steps` and `ingredients`, an exact match to the scored snapshot: the original DynamoDB value if the field was present, or `attribute_not_exists(field)` if it was missing. A recipe repaired after it was scored is therefore not deleted, and an unchanged `UNPARSEABLE` recipe (3.1, a missing field) can be. A delete that returns the failed item (`ReturnValuesOnConditionCheckFailure = ALL_OLD`) lets C3 see what changed. The delete is safe to repeat, because the same condition applies each time. Transient errors are retried with backoff within the request budget. The outcome falls into one of these cases. An earlier attempt of this request is *uncertain* if it ended in a timeout, a server error, a lost connection, or the deadline.
+**Delete.** The claim holder deletes the recipe from the Recipe Database (I7) with a conditional delete. The condition requires `attribute_exists(recipeId)` and, for each of `steps` and `ingredients`, an exact match to the scored snapshot: the original DynamoDB value if the field was present, or `attribute_not_exists(field)` if it was missing. A recipe repaired after it was scored is therefore not deleted, and an unchanged `UNPARSEABLE` recipe (3.1, a missing field) can be. A delete that returns the failed item (`ReturnValuesOnConditionCheckFailure = ALL_OLD`) lets C3 see what changed. The delete is safe to repeat, because the same condition applies each time. Transient errors are retried with backoff within the request budget. The outcome falls into one of these cases. An earlier attempt of this request is _uncertain_ if it ended in a timeout, a server error, a lost connection, or the deadline.
 
 - **Delete succeeds:** finish the row as `DELETED` (above), on condition `claim_id` equals this request's. Emit `RECIPE_DELETED`. If that transaction fails, the row stays `DELETING` with the correct attribution, and reconciliation finishes it (below).
 - **Condition fails and the recipe is present (it changed):** if no earlier attempt was uncertain, nothing was deleted, so this is a definitive rejection. Re-score the returned item. Release the claim (below), with the row set to `PENDING` and the new score and defects if it is still below the threshold, or to `RESOLVED` if it is not. Skip the ID with `RECIPE_CHANGED` or `NO_LONGER_ELIGIBLE`. If an earlier attempt was uncertain, follow the unknown-outcome path below.
@@ -630,40 +658,40 @@ The constraints are stated in the Requirements Document part 8.
 One row per REQ, NFR, and CON ID.
 
 - **Status:** Designed (in D0 to D2 or this specification), In progress, or Planned (not yet designed or built).
-- **Test case:** the TC numbers assigned for the Week 10 test plan (A10, due 2026-11-04), one per row.
+- **Test case:** the TC IDs of the cases in [Test_Plan.md](Test_Plan.md) part 4. Every row has at least one. Each Must row has three (v1.5).
 - **Coverage:** no design component is blank, and there are no ORPHANED rows. The two process constraints without a D0 to D2 element (CON-02, CON-05) are tied to the plan tasks that carry them and marked Planned.
 
-| Req ID | Description | Design component | Status | Test case |
-| ------ | ----------- | ---------------- | ------ | --------- |
-| REQ-01 | Retrieve relevant knowledge base articles for the changed files | C2; D0 I2, I3; D1 `select_articles`; D2 2.5 | Designed | TC-001 |
-| REQ-02 | Cited inline comments; uncited findings marked Low or Medium | C1; D0 I4, I5; D1 review pass; D2 F4 | Designed | TC-002 |
-| REQ-03 | Re-review each push on the latest `head_sha`; approve when clean | C1; D0 I1 (`synchronize`), decision 5; D2 F4, EC-02 | Designed | TC-003 |
-| REQ-04 | Dismiss informational comment with a one-line justification | C1; D0 I5; D1 UC-01 A2 (GitHub native resolve) | Designed | TC-004 |
-| REQ-05 | Manual review label and author mention when knowledge base unreachable | C1; D0 I2; D2 F4 fallback, G2, EC-05, EC-09 | Designed | TC-005 |
-| REQ-06 | Recorded outcome with citations on the pull request | C1; D0 I5 (`status`); D2 part 4 (cycle time is organization-measured) | Designed | TC-006 |
-| REQ-07 | Start an audit run; score the recipe database in batches | C3, C4; D0 I6, I7, I8; D1 `POST /v1/audit-runs`, `AUDIT_RUN`; D2 F1, 2.2; spec 3.5 active-run lock, 3.7 checkpoint | Designed | TC-007 |
-| REQ-08 | Flag recipes strictly below the threshold with field-level defects | C4; D0 I8; D1 `FLAGGED_RECIPE`, scoring algorithm; D2 2.3, EC-20 | Designed | TC-008 |
-| REQ-09 | Show flagged recipes with defects, paged, before deletion | C3 and CLI; D0 I6; D1 `GET /v1/audit-runs/{run_id}`; D2 2.2; spec 3.7 committed rows only | Designed | TC-009 |
-| REQ-10 | Delete only confirmed IDs; report the count | C3 and CLI; D1 `POST .../deletions`; D2 F2, 2.2 `audit delete`, EC-14; spec 3.8 deletion claims and conditional delete | Designed | TC-010 |
-| REQ-11 | Skip keep exceptions in later runs | C3; D1 `KEEP_EXCEPTION`, `POST .../exceptions`; D2 EC-14 | Designed | TC-011 |
-| REQ-12 | Halt on timeout or failure; keep checkpoint; show resume point | C3; D0 I7; D1 `last_cursor`; D2 F1, `halt_reason`, `resume_point`, EC-17 | Designed | TC-012 |
-| REQ-13 | Removal log entry before each delete | C3; D1 `REMOVAL_LOG`; D2 F2, EC-18; spec 3.8 claim and log in one transaction | Designed | TC-013 |
-| NFR-01 | Comments within 5 minutes of the triggering event (latest `head_sha` only) | C1; D0 Flow A timing; D2 F4, EC-02, EC-03, G4 (Q1 open) | Designed | TC-014 |
-| NFR-02 | Author notified within 10 minutes of the triggering event when the knowledge base fails | C1; D2 F4 fallback, G2, EC-29 | Designed | TC-015 |
-| NFR-03 | No batch read longer than 30 seconds | C3; D0 I7; D2 F1, G3 timeout setting, EC-17 | Designed | TC-016 |
-| NFR-04 | Authorized requests only; no unconfirmed deletion | G1; API Gateway IAM; C3 task role; D2 F2, 2.2 confirmation prompt, EC-26; spec 3.6 | Designed | TC-017 |
-| NFR-05 | All testing in the sandbox | Terraform stacks (D1 part 6); D2 part 4 gap (stack not yet specified) | Planned | TC-018 |
-| NFR-06 | No model call per recipe; article cap | D0 decision 2, decision 3; D2 G3 article cap, EC-06 | Designed | TC-019 |
-| NFR-07 | Repeatable scores; ruleset version stored | C4; D1 `ruleset_version`; D2 F3 `RULESET`, EC-21 | Designed | TC-020 |
-| NFR-08 | Deletions attributable to a confirmer and run | `REMOVAL_LOG.confirmed_by`; G4 `correlation_id`, `confirmed_by`, `recipe_id` (spec 3.1, 3.6); per-recipe claim and reconciliation (spec 3.8) | Designed | TC-021 |
-| NFR-09 | 100 times volume without gateway timeout or oversized pages | C3; D1 part 3 complexity; cursor, checkpoint, paged status (D2 part 4) | Designed | TC-022 |
-| NFR-10 | First-time Engineer completes the audit task in 10 minutes | C3 CLI; D2 2.2 command group and `--help`; five eligible pilot engineers (Requirements A-03); usability session not yet designed | Planned | TC-023 |
-| NFR-11 | Crash recovery with the same flagged set over the same data; list matches count | C3; D1 checkpoint; D2 F1, EC-13; spec 3.5 restart recovery and worker fencing, 3.7 replay of an interrupted batch | Designed | TC-024 |
-| CON-01 | Security best practices | G1; D0 part 6 minimal permissions; D2 F2; spec 3.6 | Designed | TC-025 |
-| CON-02 | Substantive code reviews | Delivery process: [Plan.md](Planning/Plan.md) R3 and section 4 (no D0 to D2 element) | Planned | TC-026 |
-| CON-03 | Isolated testing environments | Terraform non-production stack (D1 part 6; task T2); sandbox repository | Planned | TC-027 |
-| CON-04 | Minimize token and subscription cost | D0 decisions 2 and 3; D1 part 6 Copilot and on-demand billing; D2 G3 article cap | Designed | TC-028 |
-| CON-05 | Benefit developers and consumers | D0 part 1 goal; pilot validation, tasks T11 and T12 (no D0 to D2 element) | Planned | TC-029 |
+| Req ID | Description                                                                             | Design component                                                                                                                             | Status   | Test case              |
+| ------ | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ---------------------- |
+| REQ-01 | Retrieve relevant knowledge base articles for the changed files                         | C2; D0 I2, I3; D1 `select_articles`; D2 2.5; G4 `ARTICLES_SELECTED` (spec 3.1)                                                               | Designed | TC-001, TC-030, TC-031 |
+| REQ-02 | Cited inline comments; uncited findings marked Low or Medium                            | C1; D0 I4, I5; D1 review pass; D2 F4                                                                                                         | Designed | TC-002, TC-032, TC-033 |
+| REQ-03 | Re-review each push on the latest `head_sha`; approve when clean                        | C1; D0 I1 (`synchronize`), decision 5; D2 F4, EC-02                                                                                          | Designed | TC-003                 |
+| REQ-04 | Dismiss informational comment with a one-line justification                             | C1; D0 I5; D1 UC-01 A2 (GitHub native resolve)                                                                                               | Designed | TC-004                 |
+| REQ-05 | Manual review label and author mention when knowledge base unreachable                  | C1; D0 I2; D2 F4 fallback, G2, EC-05, EC-09                                                                                                  | Designed | TC-005                 |
+| REQ-06 | Recorded outcome with citations on the pull request                                     | C1; D0 I5 (`status`); D2 part 4 (cycle time is organization-measured)                                                                        | Designed | TC-006                 |
+| REQ-07 | Start an audit run; score the recipe database in batches                                | C3, C4; D0 I6, I7, I8; D1 `POST /v1/audit-runs`, `AUDIT_RUN`; D2 F1, 2.2; spec 3.5 active-run lock, 3.7 checkpoint                           | Designed | TC-007, TC-034, TC-035 |
+| REQ-08 | Flag recipes strictly below the threshold with field-level defects                      | C4; D0 I8; D1 `FLAGGED_RECIPE`, scoring algorithm; D2 2.3, EC-20                                                                             | Designed | TC-008, TC-036, TC-037 |
+| REQ-09 | Show flagged recipes with defects, paged, before deletion                               | C3 and CLI; D0 I6; D1 `GET /v1/audit-runs/{run_id}`; D2 2.2; spec 3.7 committed rows only                                                    | Designed | TC-009, TC-038, TC-039 |
+| REQ-10 | Delete only confirmed IDs; report the count                                             | C3 and CLI; D1 `POST .../deletions`; D2 F2, 2.2 `audit delete`, EC-14; spec 3.8 deletion claims and conditional delete                       | Designed | TC-010, TC-040, TC-041 |
+| REQ-11 | Skip keep exceptions in later runs                                                      | C3; D1 `KEEP_EXCEPTION`, `POST .../exceptions`; D2 EC-14                                                                                     | Designed | TC-011                 |
+| REQ-12 | Halt on timeout or failure; keep checkpoint; show resume point                          | C3; D0 I7; D1 `last_cursor`; D2 F1, `halt_reason`, `resume_point`, EC-17                                                                     | Designed | TC-012                 |
+| REQ-13 | Removal log entry before each delete                                                    | C3; D1 `REMOVAL_LOG`; D2 F2, EC-18; spec 3.8 claim and log in one transaction                                                                | Designed | TC-013, TC-042, TC-043 |
+| NFR-01 | Comments within 5 minutes of the triggering event (latest `head_sha` only)              | C1; D0 Flow A timing; D2 F4, EC-02, EC-03, G4 (Q1 open)                                                                                      | Designed | TC-014, TC-044, TC-045 |
+| NFR-02 | Author notified within 10 minutes of the triggering event when the knowledge base fails | C1; D2 F4 fallback, G2, EC-29                                                                                                                | Designed | TC-015                 |
+| NFR-03 | No batch read longer than 30 seconds                                                    | C3; D0 I7; D2 F1, G3 timeout setting, EC-17                                                                                                  | Designed | TC-016                 |
+| NFR-04 | Authorized requests only; no unconfirmed deletion                                       | G1; API Gateway IAM; C3 task role; D2 F2, 2.2 confirmation prompt, EC-26; spec 3.6                                                           | Designed | TC-017, TC-046, TC-047 |
+| NFR-05 | All testing in the sandbox                                                              | Terraform stacks (D1 part 6); D2 part 4 gap (stack not yet specified)                                                                        | Planned  | TC-018                 |
+| NFR-06 | No model call per recipe; article cap                                                   | D0 decision 2, decision 3; D2 G3 article cap, EC-06                                                                                          | Designed | TC-019                 |
+| NFR-07 | Repeatable scores; ruleset version stored                                               | C4; D1 `ruleset_version`; D2 F3 `RULESET`, EC-21                                                                                             | Designed | TC-020                 |
+| NFR-08 | Deletions attributable to a confirmer and run                                           | `REMOVAL_LOG.confirmed_by`; G4 `correlation_id`, `confirmed_by`, `recipe_id` (spec 3.1, 3.6); per-recipe claim and reconciliation (spec 3.8) | Designed | TC-021, TC-048         |
+| NFR-09 | 100 times volume without gateway timeout or oversized pages                             | C3; D1 part 3 complexity; cursor, checkpoint, paged status (D2 part 4)                                                                       | Designed | TC-022                 |
+| NFR-10 | First-time Engineer completes the audit task in 10 minutes                              | C3 CLI; D2 2.2 command group and `--help`; five eligible pilot engineers (Requirements A-03); usability session not yet designed             | Planned  | TC-023                 |
+| NFR-11 | Crash recovery with the same flagged set over the same data; list matches count         | C3; D1 checkpoint; D2 F1, EC-13; spec 3.5 restart recovery and worker fencing, 3.7 replay of an interrupted batch                            | Designed | TC-024                 |
+| CON-01 | Security best practices                                                                 | G1; D0 part 6 minimal permissions; D2 F2; spec 3.6                                                                                           | Designed | TC-025                 |
+| CON-02 | Substantive code reviews                                                                | Delivery process: [Plan.md](Planning/Plan.md) R3 and section 4 (no D0 to D2 element)                                                         | Planned  | TC-026                 |
+| CON-03 | Isolated testing environments                                                           | Terraform non-production stack (D1 part 6; task T2); sandbox repository                                                                      | Planned  | TC-027                 |
+| CON-04 | Minimize token and subscription cost                                                    | D0 decisions 2 and 3; D1 part 6 Copilot and on-demand billing; D2 G3 article cap                                                             | Designed | TC-028                 |
+| CON-05 | Benefit developers and consumers                                                        | D0 part 1 goal; pilot validation, tasks T11 and T12 (no D0 to D2 element)                                                                    | Planned  | TC-029                 |
 
 ---
 
