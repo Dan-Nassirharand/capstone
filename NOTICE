@@ -1,0 +1,42 @@
+GE Appliances, a Haier Company: Agentic Upgrades
+Dan Nassirharand and Maxwell Blevins, University of Cincinnati senior capstone
+
+Project license: proprietary. All rights belong to GE Appliances, a Haier Company.
+No license is granted to anyone else. See Ethics_Statement.md, part 3.
+
+This repository currently holds documentation only. The list below is the same
+as Ethics_Statement.md, part 4. Versions are planned until a build file exists.
+
+Libraries and tools (SPDX license, source)
+- Spring Boot (Apache-2.0): https://github.com/spring-projects/spring-boot
+- AWS SDK for Java v2 (Apache-2.0): https://github.com/aws/aws-sdk-java-v2
+- picocli (Apache-2.0): https://github.com/remkop/picocli
+- jackson-dataformats-text, YAML (Apache-2.0): https://github.com/FasterXML/jackson-dataformats-text
+- Logback (EPL-2.0 OR LGPL-2.1-only; EPL-2.0 elected): https://github.com/qos-ch/logback
+- SLF4J (MIT): https://github.com/qos-ch/slf4j
+- JUnit 5 (EPL-2.0, test scope): https://github.com/junit-team/junit-framework
+- Testcontainers (MIT, test scope): https://github.com/testcontainers/testcontainers-java
+- Toxiproxy (MIT, test tool): https://github.com/Shopify/toxiproxy
+- Terraform (BUSL-1.1): https://github.com/hashicorp/terraform
+- Terraform AWS provider (MPL-2.0): https://github.com/hashicorp/terraform-provider-aws
+- AWS CLI v2 (Apache-2.0): https://github.com/aws/aws-cli
+- awscurl (MIT): https://github.com/okigan/awscurl
+- GitHub CLI (MIT): https://github.com/cli/cli
+- Mermaid (MIT, documentation diagrams): https://github.com/mermaid-js/mermaid
+- Eclipse Temurin (GPL-2.0-only WITH Classpath-exception-2.0): https://adoptium.net
+- Docker Desktop (proprietary): https://www.docker.com/products/docker-desktop/
+
+Code adapted from tutorials or other repositories
+- None.
+
+Design references
+- Amazon DynamoDB TransactWriteItems: https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_TransactWriteItems.html
+- JSON Schema draft 2020-12: https://json-schema.org/draft/2020-12/schema
+
+Datasets
+- Recipe Database and pilot copy: provided by GE through the Advisor. GE internal use only. Not committed.
+- Knowledge base: existing GE documentation in a read-only GitHub repository. GE internal. Not copied.
+- recipes-seed-v1, recipes-gen-2m, kb-fixture-v1, pr-article-map.csv (planned): generated or written by the team; synthetic.
+
+Non-code assets
+- None. No icons, fonts, or images are used.

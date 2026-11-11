@@ -13,6 +13,11 @@ Dan Nassirharand and Maxwell Blevins' undergraduate senior capstone project at t
 - [Test Plan](Test_Plan.md)
 - [Design Diagrams (D0, D1, D2)](Design_Diagrams)
 
+## 5. Ethics and Responsible Use
+
+- [Ethics and Responsible-Use Statement](Ethics_Statement.md): privacy, security, licensing, attribution, and AI-use disclosure
+- [NOTICE](NOTICE): third-party attribution list and project license statement
+
 ## Appendix
 
 - [Project Description](Project-Description.md)

@@ -2,7 +2,7 @@
 
 - **Project:** GE Appliances, a Haier Company: Agentic Upgrades
 - **Team members:** Dan Nassirharand, Maxwell Blevins
-- **Document version:** 1.5 (2026-11-04)
+- **Document version:** 1.6 (2026-11-10)
 - **Traces to:** [Requirements_Document.md](Requirements_Document.md) **version 1.4 (2026-10-29)**. Terms (Engineer, audit run, flagged recipe, triggering event, and so on) are used as defined in its glossary.
 - **Design sources:** [D0](Design_Diagrams/D0_High_Level_Design.md), [D1](Design_Diagrams/D1_Detailed_Design.md), [D2](Design_Diagrams/D2_Detailed_Design.md) (2026-10-14). Where this specification and those documents differ, this specification governs. Every difference is listed in part 1.
 
@@ -21,6 +21,16 @@
 ## 1. Version and Change Log
 
 Each version names the Requirements Document version it traces to. Any later change to D0 to D2 or to the Requirements Document is logged here with the new requirements version.
+
+### Version 1.6 (2026-11-10), traces to Requirements v1.4
+
+Authors: Dan Nassirharand, Maxwell Blevins
+
+These changes come from the [Ethics_Statement.md](Ethics_Statement.md) security and privacy review.
+
+- **Request throttle (3.2, 4, 5.2).** The API Gateway stage is throttled at 5 requests per second with a burst of 10, set in Terraform (task T2). A throttled request returns 429 with the standard `error` body. This limits abuse of the five endpoints and does not change any endpoint, schema, or requirement.
+- **CLI help warning (3.2).** The help text of `audit except` tells the Engineer not to enter personal data in `--reason`, because the reason is free text kept with no name attached (task T9).
+- No endpoint, schema, or requirement changed.
 
 ### Version 1.5 (2026-11-04), traces to Requirements v1.4
 
@@ -228,7 +238,7 @@ I1 to I8 are from [D0 part 4](Design_Diagrams/D0_High_Level_Design.md#4-interfac
 
 ### 3.2 C3 endpoints
 
-All endpoints use HTTPS and JSON, have the `/v1` prefix, and require SigV4. The major version is in the path; adding optional fields is not a breaking change (D1 part 5). Every 4xx and 5xx response uses the `error` body in 3.3.
+All endpoints use HTTPS and JSON, have the `/v1` prefix, and require SigV4. The stage is throttled at 5 requests per second with a burst of 10; a throttled request returns 429 with the `error` body in 3.3. The major version is in the path; adding optional fields is not a breaking change (D1 part 5). Every 4xx and 5xx response uses the `error` body in 3.3.
 
 #### `POST /v1/audit-runs`: start a run
 
@@ -260,7 +270,7 @@ All endpoints use HTTPS and JSON, have the `/v1` prefix, and require SigV4. The 
 - **Success:** 200 with `deleted_count`, `deleted_ids`, and, when any ID was not deleted, `not_deleted` (each ID with a reason: `CLAIMED_ELSEWHERE`, `NO_LONGER_ELIGIBLE`, `RECIPE_CHANGED`, `RECIPE_ABSENT`, `LOG_WRITE_FAILED`, `DELETE_FAILED`, `OUTCOME_UNKNOWN`, or `NOT_ATTEMPTED`). IDs that were not deleted can be retried (3.8); an `OUTCOME_UNKNOWN` ID may have an unresolved claim transaction or delete. A retry or startup recovery reconciles any committed claim under its original attribution (3.8). The request has a 20-second budget (3.8), below the 29-second gateway limit. IDs not started when it ends are returned as `NOT_ATTEMPTED`, so the response always arrives with a complete result.
 - **Errors:** 400 `INVALID_REQUEST`; 403 `FORBIDDEN` (no verified caller identity, 3.6); 404 `RUN_NOT_FOUND`; 409 `RUN_NOT_AWAITING_CONFIRMATION`; 422 `RECIPE_NOT_DELETABLE`; 503 `LOG_WRITE_FAILED` or `OUTCOME_UNKNOWN` for a failed or unresolved claim transaction, respectively (only if nothing was deleted). These 503 bodies also include `not_deleted`, with one result for every distinct ID, including the affected ID and all unstarted IDs.
 
-**CLI mapping.** The CLI maps these to `audit start`, `audit status`, `audit resume`, `audit except`, and `audit delete` ([D2 part 2.2](Design_Diagrams/D2_Detailed_Design.md)). `audit delete` asks the Engineer to type `yes` before any request is sent, then prints the count deleted and each ID that was not deleted with its reason (`not_deleted`, 3.2).
+**CLI mapping.** The CLI maps these to `audit start`, `audit status`, `audit resume`, `audit except`, and `audit delete` ([D2 part 2.2](Design_Diagrams/D2_Detailed_Design.md)). `audit delete` asks the Engineer to type `yes` before any request is sent, then prints the count deleted and each ID that was not deleted with its reason (`not_deleted`, 3.2). The help text of `audit except` warns the Engineer not to enter personal data in `--reason`.
 
 ### 3.3 Message payloads (JSON Schema)
 
@@ -601,7 +611,7 @@ Full comparisons and rejected alternatives are in [D1 part 6](Design_Diagrams/D1
 - **Knowledge base store (C2): GitHub repository.** Documentation is already migrated there (UC-01). Read on each run, so there is no index to go stale (REQ-01, REQ-05).
 - **Backend (C3, C4): Java with Spring Boot (Apache-2.0).** Team skill and mutual code review (CON-02). The light workload easily meets NFR-03 and NFR-09.
 - **Client (C3): picocli and `java.net.http`, with the AWS SDK v2 signer.** The command line is the only interface (W-05). Help output supports NFR-10. Typed confirmation implements REQ-10 and NFR-04.
-- **API authentication: Amazon API Gateway with IAM (SigV4) authorization.** Authentication is not hand-rolled (NFR-04, CON-01). Requests are rejected with 403 before C3 is reached, and the verified caller is passed to C3 for attribution (NFR-08, 3.6).
+- **API authentication: Amazon API Gateway with IAM (SigV4) authorization.** Authentication is not hand-rolled (NFR-04, CON-01). Requests are rejected with 403 before C3 is reached, and the verified caller is passed to C3 for attribution (NFR-08, 3.6). The stage is throttled at 5 requests per second with a burst of 10, set in Terraform.
 - **Hosting (C3): AWS ECS Fargate, one task.** A long-running container has no 15-minute function limit (REQ-07, NFR-09). Restart recovery uses the checkpoint (NFR-11). The deployment settings in 3.5 keep a single instance (W-08).
 - **Data store: Amazon DynamoDB, AWS SDK for Java v2.** Same store as the Recipe Database. Key lookups only (REQ-07, REQ-13). Transactions give the active-run guard (W-08, 3.5) and the deletion claims (NFR-08, 3.8). Per-request billing (CON-04).
 - **Scoring rules (C4): plain Java code, with rule penalties in a Jackson YAML ruleset.** No model call per recipe (NFR-06, CON-04). Repeatable scores (NFR-07). Weights change without code changes (REQ-08).
@@ -645,6 +655,7 @@ The constraints are stated in the Requirements Document part 8.
 ### 5.2 Technical limits carried from D1 and D2
 
 - **API Gateway allows 29 seconds per request.** Start and resume return 202 immediately; progress is read by polling status.
+- **The stage throttle is 5 requests per second, burst 10.** Status paging and grouped requests (200 IDs per group) share this limit.
 - **Copilot review pass time is unmeasured (D2 Q1, OQ-01).** NFR-01 is verified by task T1 and pilot results; the manual review label is the fallback.
 - **One C3 instance and one audit run at a time (W-08).** On startup, any RUNNING run becomes HALTED (`RESTART`) and the Engineer resumes it. The active-run lock enforces one run (3.5).
 - **An abandoned run holds the active-run lock (3.5).** New runs are refused until the Engineer completes it by deleting, keeping, or resolving every flagged recipe. A cancel operation is a candidate for a later release if the pilot needs it.

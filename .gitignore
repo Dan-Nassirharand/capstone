@@ -1,0 +1,26 @@
+# Secrets and credentials
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+.aws/
+credentials
+secrets.*
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+crash.log
+
+# Build output and editor files
+target/
+build/
+.gradle/
+.idea/
+*.log
+.DS_Store
