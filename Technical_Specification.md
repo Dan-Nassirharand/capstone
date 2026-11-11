@@ -2,7 +2,7 @@
 
 - **Project:** GE Appliances, a Haier Company: Agentic Upgrades
 - **Team members:** Dan Nassirharand, Maxwell Blevins
-- **Document version:** 1.6 (2026-11-10)
+- **Document version:** 1.7 (2026-11-11)
 - **Traces to:** [Requirements_Document.md](Requirements_Document.md) **version 1.4 (2026-10-29)**. Terms (Engineer, audit run, flagged recipe, triggering event, and so on) are used as defined in its glossary.
 - **Design sources:** [D0](Design_Diagrams/D0_High_Level_Design.md), [D1](Design_Diagrams/D1_Detailed_Design.md), [D2](Design_Diagrams/D2_Detailed_Design.md) (2026-10-14). Where this specification and those documents differ, this specification governs. Every difference is listed in part 1.
 
@@ -21,6 +21,20 @@
 ## 1. Version and Change Log
 
 Each version names the Requirements Document version it traces to. Any later change to D0 to D2 or to the Requirements Document is logged here with the new requirements version.
+
+### Version 1.7 (2026-11-11), traces to Requirements v1.4
+
+Authors: Dan Nassirharand, Maxwell Blevins
+
+These changes close the Maxwell items from the [Ethics_Statement.md](Ethics_Statement.md) security review.
+
+- **Pilot image refuses the `local` profile (5.2, task T8).** C3 now refuses to start in the pilot image with the `local` or the `fault-injection` profile, and logs the refusal. This removes the default `test-eng-a` identity from any deployed image.
+- **Session lifetime (task T2).** IAM Identity Center permission sets for the team and pilot engineers use a 1-hour session duration, set in Terraform.
+- **Log retention (task T2).** The C3 log group keeps entries for 30 days, set in Terraform, then the team hands them over (Ethics part 1).
+- **Gateway to load balancer hop (3.6).** Traffic goes through the API Gateway VPC link to a private load balancer and stays on the AWS private network. No TLS listener is added, because a private-network certificate needs a domain the project does not have; the risk is accepted and recorded in the Ethics Statement.
+- **Dependency and code scanning (tasks T2, T4).** Dependabot alerts and CodeQL are enabled on the repository when the first build file and source code are added.
+- **Test case TC-049** added for the request throttle ([Test_Plan.md](Test_Plan.md) v1.1).
+- No endpoint, schema, or requirement changed.
 
 ### Version 1.6 (2026-11-10), traces to Requirements v1.4
 
@@ -690,7 +704,7 @@ One row per REQ, NFR, and CON ID.
 | NFR-01 | Comments within 5 minutes of the triggering event (latest `head_sha` only)              | C1; D0 Flow A timing; D2 F4, EC-02, EC-03, G4 (Q1 open)                                                                                      | Designed | TC-014, TC-044, TC-045 |
 | NFR-02 | Author notified within 10 minutes of the triggering event when the knowledge base fails | C1; D2 F4 fallback, G2, EC-29                                                                                                                | Designed | TC-015                 |
 | NFR-03 | No batch read longer than 30 seconds                                                    | C3; D0 I7; D2 F1, G3 timeout setting, EC-17                                                                                                  | Designed | TC-016                 |
-| NFR-04 | Authorized requests only; no unconfirmed deletion                                       | G1; API Gateway IAM; C3 task role; D2 F2, 2.2 confirmation prompt, EC-26; spec 3.6                                                           | Designed | TC-017, TC-046, TC-047 |
+| NFR-04 | Authorized requests only; no unconfirmed deletion                                       | G1; API Gateway IAM; C3 task role; D2 F2, 2.2 confirmation prompt, EC-26; spec 3.6                                                           | Designed | TC-017, TC-046, TC-047, TC-049 |
 | NFR-05 | All testing in the sandbox                                                              | Terraform stacks (D1 part 6); D2 part 4 gap (stack not yet specified)                                                                        | Planned  | TC-018                 |
 | NFR-06 | No model call per recipe; article cap                                                   | D0 decision 2, decision 3; D2 G3 article cap, EC-06                                                                                          | Designed | TC-019                 |
 | NFR-07 | Repeatable scores; ruleset version stored                                               | C4; D1 `ruleset_version`; D2 F3 `RULESET`, EC-21                                                                                             | Designed | TC-020                 |
